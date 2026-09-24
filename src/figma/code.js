@@ -209,7 +209,7 @@ async function exportSelection(api, progress, options={}) {
         const svg=await clone.exportAsync({format:'SVG_STRING',svgOutlineText:false,svgIdAttribute:true,svgSimplifyStroke:false,contentsOnly:true,useAbsoluteBounds:true,colorProfile:'SRGB'});
         if(typeof svg!=='string' || !svg.trim().startsWith('<svg')) throw new Error('Figma did not return SVG text.');
         timings.svgMs=Date.now()-svgStarted;
-        const packet={format:'figma-affinity',version:plan.frames ? 2 : 1,exporterVersion:'0.6.2',name:plan.name,
+        const packet={format:'figma-affinity',version:plan.frames ? 2 : 1,exporterVersion:'__VERSION__',name:plan.name,
             frame:{width:plan.width,height:plan.height},svg,layers,texts,warnings,imageOptimization};
         if(plan.frames)packet.artboards=artboards;
         timings.totalMs=Date.now()-started;

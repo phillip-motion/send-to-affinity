@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const {compile,readTransfer,indexLayersByName}=require('../affinity/importer.js');
-const {exportSelection,multiply,inverse}=require('../figma-plugin/code.js');
+const {exportSelection,multiply,inverse}=require('../figma/code.js');
 const example=()=>JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/editable-text.figma-affinity.json'),'utf8'));
 const run=p=>compile(JSON.stringify(p));
 

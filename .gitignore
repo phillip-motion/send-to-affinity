@@ -1,6 +1,5 @@
 node_modules/
-dist/
 .DS_Store
 .claude/settings.local.json
 *.figma-affinity.json
-!test/fixtures/*.figma-affinity.json
+!src/test/fixtures/*.figma-affinity.json

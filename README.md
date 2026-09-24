@@ -9,7 +9,9 @@ Everything runs locally. The Figma plugin talks to Affinity's built-in MCP serve
 **Requirements:** Affinity 3.3 or later, and the Figma desktop app.
 
 1. **Affinity:** go to **Settings → Model Context Protocol** and turn on both **Enable Affinity MCP** and **Access Files on your Desktop**. Images are saved alongside each import.
-2. **Figma:** download the latest zip from [Releases](https://github.com/phillip-motion/send-to-affinity/releases) and unzip it. Then go to **Plugins → Development → Import plugin from manifest…** and choose its `manifest.json`.
+2. **Figma:** download this repo (**Code → Download ZIP**) or the latest [release](https://github.com/phillip-motion/send-to-affinity/releases), and unzip it. In Figma desktop, go to **Plugins → Development → Import plugin from manifest…** and choose **`figma-plugin/manifest.json`**.
+
+That's it. The `figma-plugin` folder is ready to use; you don't need to build anything. Everything in `src/` is only for development.
 
 ## Use
 
@@ -29,14 +31,22 @@ Photos fully hidden under an opaque image fill are left out automatically, so se
 | Text | Editable text frames with mixed fonts, sizes, colours, spacing and alignment |
 | Linear-gradient text | Editable text with the gradient placed correctly |
 | Vectors, shapes, gradients, clips | Affinity's SVG importer |
-| Image fills | Embedded images at original resolution, with crops kept |
-| Layer blur, drop shadow, inner shadow | Native Gaussian Blur, Outer Shadow and Inner Shadow |
+| Angular gradients | Native conical gradients |
+| Image fills, including tiled | Embedded images at original resolution, with crops kept; tiles repeat natively |
+| Layer blur, drop shadow, inner shadow | Native Gaussian Blur, Outer Shadow and Inner Shadow, with spread |
+| Background blur | A Gaussian Blur live filter masked to the layer |
+| Masks | Pixel masks, with Figma's alpha masks and blurred mask edges kept |
+| Inside and outside strokes | Native inside and outside stroke alignment |
 
-Not converted (reported as warnings): background blur, auto layout, other filters, text with image fills or strokes, and centre/bottom vertically aligned text. Install the same fonts in both apps. Text wrapping and baselines can differ slightly between them.
+Not converted (reported as warnings): diamond gradients, auto layout, other filters, and text with image fills or strokes. Install the same fonts in both apps. Text wrapping can differ slightly between them.
 
 ## Develop
 
-Requires Node 22+. There are no dependencies.
+Everything for development lives in `src/`. Requires Node 22+. There are no dependencies.
+
+```bash
+cd src
+```
 
 ```bash
 npm test
@@ -46,16 +56,17 @@ npm test
 npm run dev
 ```
 
-`npm run dev` rebuilds `dist/` on every change. In Figma, import `dist/manifest.json` once, then just rerun the plugin. `npm run build` does a single build.
+`npm run dev` rebuilds `figma-plugin/` at the repo root on every change; rerun the plugin in Figma to pick it up. `npm run build` does a single build. Commit `figma-plugin/` along with your source changes, since that's what people install. CI fails if it's out of date.
 
 | Path | What it is |
 | --- | --- |
-| `figma-plugin/` | Plugin source: `code.js` (clones the selection, records text and effects, exports SVG), `ui.html` (panel), `bridge.js` (local MCP connection) |
-| `affinity/importer.js` | Runs inside Affinity: validates the SVG, rebuilds text, images, effects and artboards |
-| `scripts/build.js` | Writes `dist/`, embedding the importer in the panel and the version from `package.json` |
-| `test/` | Node tests and small fixtures |
+| `figma-plugin/` | The built plugin people import. Generated; don't edit by hand |
+| `src/figma/` | Plugin source: `code.js` (clones the selection, records text and effects, exports SVG), `ui.html` (panel), `bridge.js` (local MCP connection), `manifest.json` |
+| `src/affinity/importer.js` | Runs inside Affinity: validates the SVG, rebuilds text, images, effects and artboards |
+| `src/scripts/build.js` | Writes `figma-plugin/`, embedding the importer in the panel and the version from `src/package.json` |
+| `src/test/` | Node tests and small fixtures |
 
-To release, run `npm version patch` (or `minor`), then `git push --follow-tags`. CI tests and builds the plugin, then attaches the zip to a GitHub release.
+To release, bump `version` in `src/package.json`, run `npm run build`, commit, then tag and push it (for example `git tag v0.6.3 && git push --follow-tags`). CI tests, checks the build and attaches the plugin zip to a GitHub release.
 
 ## Credits
 

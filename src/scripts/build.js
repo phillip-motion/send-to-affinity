@@ -1,6 +1,6 @@
 'use strict';
-// Builds dist/, the installable Figma plugin: the importer is embedded in the
-// panel and __VERSION__ comes from package.json.
+// Builds ../figma-plugin/, the ready-to-import Figma plugin at the repo root:
+// the importer is embedded in the panel and __VERSION__ comes from package.json.
 const fs=require('node:fs'),path=require('node:path');
 const root=path.join(__dirname,'..'),read=file=>fs.readFileSync(path.join(root,file),'utf8');
 const MARKER='// Everything above is embedded in the Figma plugin';
@@ -14,16 +14,16 @@ function files(version=JSON.parse(read('package.json')).version) {
     const stamp=file=>read(file).replaceAll('__VERSION__',version);
     const literal=JSON.stringify(importer()).replace(/</g,'\\u003c');
     return {
-        'manifest.json':read('figma-plugin/manifest.json'),
-        'code.js':stamp('figma-plugin/code.js'),
-        'ui.html':stamp('figma-plugin/ui.html').replace('/* NATIVE_IMPORTER_AND_BRIDGE */',()=>'const NATIVE_IMPORTER='+literal+';\n'+stamp('figma-plugin/bridge.js')),
+        'manifest.json':read('figma/manifest.json'),
+        'code.js':stamp('figma/code.js'),
+        'ui.html':stamp('figma/ui.html').replace('/* NATIVE_IMPORTER_AND_BRIDGE */',()=>'const NATIVE_IMPORTER='+literal+';\n'+stamp('figma/bridge.js')),
     };
 }
 
 if(require.main===module) {
-    const out=path.join(root,'dist');
+    const out=path.join(root,'..','figma-plugin');
     fs.mkdirSync(out,{recursive:true});
     for(const [name,content] of Object.entries(files()))fs.writeFileSync(path.join(out,name),content);
-    console.log('Built dist/. In Figma, import dist/manifest.json.');
+    console.log('Built figma-plugin/. In Figma, import figma-plugin/manifest.json.');
 }
 module.exports={files,importer};

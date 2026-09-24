@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
-    "dev": "node --watch-path=figma-plugin --watch-path=affinity scripts/build.js",
+    "dev": "node --watch-path=figma --watch-path=affinity scripts/build.js",
     "test": "node --test"
   },
   "license": "MIT"

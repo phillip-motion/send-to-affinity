@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const {compile,parseXml}=require('../affinity/importer.js');
-const {selectionInfo,selectionKey,selectionRoots,exportSelection}=require('../figma-plugin/code.js');
+const {selectionInfo,selectionKey,selectionRoots,exportSelection}=require('../figma/code.js');
 const fixture=()=>JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/artboards.figma-affinity.json'),'utf8'));
 const run=p=>compile(JSON.stringify(p));
 

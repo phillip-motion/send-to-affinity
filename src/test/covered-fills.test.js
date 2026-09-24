@@ -1,7 +1,7 @@
 'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {opaqueImageBytes,imageCoversShape,pruneCoveredImageFills}=require('../figma-plugin/code.js');
+const {opaqueImageBytes,imageCoversShape,pruneCoveredImageFills}=require('../figma/code.js');
 const image=(overrides={})=>({type:'IMAGE',imageHash:'photo',scaleMode:'FILL',opacity:1,blendMode:'NORMAL',...overrides});
 const jpeg=new Uint8Array([255,216,255,224,0,2,255,217]);
 function png(type=2,transparent=false){

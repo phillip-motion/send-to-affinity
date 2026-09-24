@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const vm=require('node:vm');
-const {AffinityConnection,nativeImportScript,readImportResult}=require('../figma-plugin/bridge.js');
+const {AffinityConnection,nativeImportScript,readImportResult}=require('../figma/bridge.js');
 
 function transport({endpoint='/message?sessionId=test',reply,failFetch=false}={}) {
     let stream;const sent=[];
@@ -108,7 +108,7 @@ function panel(tool) {
         ResizeObserver:class {observe(){}},timers,setTimeout:fn=>timers.push(fn),clearTimeout(){},
         AffinityConnection:class {async connect(){} tool(){return tool;} close(){}},
         nativeImportScript:()=>'',readImportResult};
-    const html=fs.readFileSync(path.join(__dirname,'../figma-plugin/ui.html'),'utf8');
+    const html=fs.readFileSync(path.join(__dirname,'../figma/ui.html'),'utf8');
     const script=html.slice(html.indexOf('<script>')+8,html.lastIndexOf('</script>')).replace('/* NATIVE_IMPORTER_AND_BRIDGE */',"const NATIVE_IMPORTER='';");
     vm.createContext(context);vm.runInContext(script,context);
     const receive=message=>context.window.onmessage({data:{pluginMessage:message}});

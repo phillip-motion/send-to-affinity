@@ -9,6 +9,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,10 +19,16 @@ jobs:
           node-version: 22
       - run: npm test
       - run: npm run build
-      # Tagged builds (npm version patch && git push --follow-tags) become a release with the plugin attached.
+      # figma-plugin/ is committed so people can import it straight from a download.
+      - name: Check the committed plugin matches the source
+        run: |
+          if [ -n "$(git status --porcelain -- ../figma-plugin)" ]; then
+            echo "figma-plugin/ is out of date. Run 'npm run build' in src/ and commit it."; git status --short -- ../figma-plugin; exit 1
+          fi
+      # Tagged builds become a release with the plugin attached.
       - if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          cd dist && zip -r "../send-to-affinity-${GITHUB_REF_NAME}.zip" . && cd ..
+          cd ../figma-plugin && zip -r "../send-to-affinity-${GITHUB_REF_NAME}.zip" . && cd ..
           gh release create "$GITHUB_REF_NAME" "send-to-affinity-${GITHUB_REF_NAME}.zip" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
