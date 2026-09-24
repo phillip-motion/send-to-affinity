@@ -51,3 +51,25 @@ test('SVG transforms compose in order and keep rotations around their centre',()
     assert.deepEqual(multiplyAffine([1,0,0,1,5,6],[2,0,0,3,0,0]),[2,0,0,3,5,6]);
     assert.throws(()=>svgTransform('scale(0)'));
 });
+const angular=fs.readFileSync(__dirname+'/fixtures/figma-angular-gradient.svg','utf8');
+test('Figma angular gradient helper is dropped and rebuilt as a native conical gradient',()=>{
+    const r=compile(angular);
+    assert.deepEqual(r.warnings,[]);
+    assert.doesNotMatch(r.svg,/foreignObject|data-figma-skip-parse|data-figma-gradient-fill/);
+    assert.match(r.svg,/<path[^>]*fill="rgb\(128,0,128\)"[^>]*id="FigmaPasteAngular1"/);
+    const [spec]=r.angularGradients;
+    assert.equal(spec.marker,'FigmaPasteAngular1');assert.deepEqual(spec.gradientToSpread,[200,0,0,200,100,100]);
+    assert.deepEqual(spec.stops.map(s=>s.position),[0,.25,.75,1]);
+    assert.deepEqual(spec.stops[0].rgba,spec.stops[3].rgba);
+});
+test('angular wrap colour matches the colour Figma writes at 0°',()=>{
+    // Stops from a real export; Figma's CSS helper starts at rgba(220, 197, 73).
+    const paint=JSON.stringify({type:'GRADIENT_ANGULAR',stops:[{color:{r:0,g:.50196,b:.035294,a:1},position:.403846},{color:{r:.858824,g:.078431,b:.172549,a:1},position:.538462},{color:{r:.956863,g:.803922,b:.313726,a:1},position:.956731}],transform:{m00:124.05,m01:-169.97,m02:421.47,m10:169.97,m11:124.05,m12:533.04},opacity:1});
+    const r=compile(angular.replace(/data-figma-gradient-fill="[^"]*"/,'data-figma-gradient-fill="'+paint.replace(/"/g,'&#34;')+'"'));
+    r.angularGradients[0].stops[0].rgba.slice(0,3).forEach((v,i)=>assert.ok(Math.abs(v*255-[220,197,73][i])<1));
+});
+test('diamond gradients import with a warning instead of blocking the design',()=>{
+    const r=compile(angular.replace('GRADIENT_ANGULAR','GRADIENT_DIAMOND'));
+    assert.equal(r.angularGradients.length,0);assert.doesNotMatch(r.svg,/foreignObject/);
+    assert.match(r.warnings.join('\n'),/diamond gradients aren’t supported/);
+});

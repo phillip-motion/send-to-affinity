@@ -102,8 +102,10 @@ test('Figma backdrop helper does not block artwork or its native shadow',()=>{
     assert.ok(elements(parseXml(r.svg),'rect').find(n=>n.attrs.id===r.effects[0].marker));
     assert.equal(r.effects[0].native[0].kind,'outerShadow');
     assert.equal(r.effects[0].native[0].sigma,4);
-    assert.equal(elements(parseXml(r.svg),'rect').length,4);
-    assert.match(r.warnings.join('\n'),/background blur isn’t supported/);
+    // The helper becomes a white mask shape for a background-blur live filter, built after import.
+    assert.equal(elements(parseXml(r.svg),'rect').length,5);
+    assert.deepEqual(r.warnings,[]);
+    assert.equal(r.backdrops.length,1);assert.match(r.svg,new RegExp('<rect[^>]*id="'+r.backdrops[0].marker+'"[^>]*fill="white"'));
     assert.equal(r.effects.filter(e=>e.native.some(f=>f.kind==='blur')).length,0,'do not blur the foreground instead');
     assert.doesNotThrow(()=>compile(fixture('figma-backdrop-blur.svg'),{repairBlur:false}));
 });
@@ -126,7 +128,7 @@ test('foreignObject exception cannot discard meaningful HTML or active content',
     ];
     for(const input of invalid)assert.throws(()=>compile(input),/foreignObject|Active SVG|style sheets/);
 });
-test('backdrop omission retains transfer artboards and names the affected layer',()=>{
+test('background blur retains transfer artboards and names the affected layer',()=>{
     const svg=fixture('figma-backdrop-blur.svg').replace('<rect width="640"','<g id="FP_1"><rect width="640"').replace('<defs>','</g><g id="FP_3"/><defs>');
     const packet={format:'figma-affinity',version:2,name:'Two boards',frame:{width:640,height:360},
         svg,warnings:[],texts:[],layers:[{marker:'FP_1',name:'First'},{marker:'FP_2',name:'Dock Background'},{marker:'FP_3',name:'Second'}],
@@ -135,7 +137,7 @@ test('backdrop omission retains transfer artboards and names the affected layer'
     const r=compile(JSON.stringify(packet));
     assert.equal(r.artboards.length,2);
     assert.equal(r.artboards[0].name,'First');
-    assert.match(r.warnings.join('\n'),/Dock Background: background blur isn’t supported/);
+    assert.deepEqual(r.warnings,[]);assert.equal(r.backdrops[0].name,'Dock Background');
     assert.ok(r.effects.find(e=>e.name==='FP_2'));
 });
 test('XML entities, self-closing SVG and internal references are accepted', () => {
@@ -151,10 +153,76 @@ test('existing IDs remain intact when assigning a native blur', () => {
     assert.equal(elements(parseXml(r.svg), 'use')[0].attrs.href, '#box');
 });
 test('scaled and SourceAlpha filters remain delegated instead of receiving an incorrect native effect', () => {
-    for (const input of ['<g transform="scale(2)"><rect filter="url(#f)"/></g>', '<g filter="url(#f)"><rect transform="scale(2)"/></g>']) {
+    for (const input of ['<g transform="scale(2)"><rect filter="url(#f)"/></g>', '<g filter="url(#f)" transform="scale(2)"><rect/></g>']) {
         const r = compile('<svg><defs><filter id="f"><feGaussianBlur stdDeviation="4"/></filter></defs>' + input + '</svg>');
         assert.equal(r.effects.length, 0); assert.ok(r.warnings.length);
     }
+    // Affinity draws effects in page space, so a scaled shape inside the blurred group is fine.
+    assert.equal(compile('<svg><defs><filter id="f"><feGaussianBlur stdDeviation="4"/></filter></defs><g filter="url(#f)"><rect transform="scale(2)"/></g></svg>').effects.length, 1);
     const alpha = compile('<svg><defs><filter id="f"><feGaussianBlur in="SourceAlpha" stdDeviation="4"/></filter></defs><rect filter="url(#f)"/></svg>');
     assert.equal(alpha.effects.length, 0);
+});
+
+const blurred=transform=>'<svg width="400" height="400" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg"><g id="Blur" filter="url(#f)"><circle cx="50" cy="50" r="50" transform="'+transform+'" fill="#5BAAFF"/></g><defs><filter id="f" x="-500" y="-500" width="1400" height="1400" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur stdDeviation="350" result="effect1_foregroundBlur"/></filter></defs></svg>';
+test('layer blur survives rotated, flipped, skewed and scaled shapes inside the blurred group', () => {
+    // Exact matrices from Figma exports: rotation plus a flip, a 0.1° rounding skew, and a real 28° skew.
+    for (const transform of ['matrix(0.968309 -0.249754 -0.249754 -0.968309 100 200)', 'matrix(0.834695 0.550712 -0.549269 0.835646 1183.83 -61.7052)', 'matrix(-0.691249 0.722617 -0.963922 -0.266185 887.746 339.286)', 'scale(2)']) {
+        const r = compile(blurred(transform));
+        assert.equal(r.effects.length, 1, transform); assert.deepEqual(r.warnings, []);
+    }
+});
+
+test('SVG text tracking is recorded in em so Affinity’s loader scaling can be corrected', () => {
+    const svg = body => compile('<svg width="400" height="200" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">' + body + '</svg>').textTracking;
+    assert.deepEqual(svg('<text id="A" font-size="100" letter-spacing="-0.035em"><tspan x="0" y="100">Hi</tspan></text>'), [{marker: 'A', characterSpacing: -0.035}]);
+    assert.deepEqual(svg('<text id="B" font-size="100" letter-spacing="-4px"><tspan x="0" y="100">Hi</tspan></text>'), [{marker: 'B', characterSpacing: -0.04}]);
+    assert.deepEqual(svg('<text id="C" font-size="100" letter-spacing="-0.04em"><tspan letter-spacing="0.1em">A</tspan><tspan>B</tspan></text>'), []);
+    assert.deepEqual(svg('<text id="D" font-size="100"><tspan x="0" y="100">Hi</tspan></text>'), []);
+});
+
+test('SVG text font faces are recorded so variable-font weights can be restored', () => {
+    const fonts = body => compile('<svg width="400" height="200" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">' + body + '</svg>').textFonts;
+    assert.deepEqual(fonts('<text id="A" font-family="Affinity Serif Variable" font-style="italic" font-weight="bold"><tspan x="0" y="100">all</tspan></text>'), [{marker: 'A', family: 'Affinity Serif Variable', weight: 700, italic: true}]);
+    assert.deepEqual(fonts('<g font-family="\'Inter\', sans-serif" font-weight="500"><text id="B"><tspan>new</tspan></text></g>'), [{marker: 'B', family: 'Inter', weight: 500, italic: false}]);
+    assert.deepEqual(fonts('<text id="C" font-family="Inter"><tspan font-weight="bold">A</tspan><tspan>B</tspan></text>'), []);
+});
+
+test('Figma layer blurs on mask shapes are baked back into the SVG mask', () => {
+    // Figma's SVG export drops the blur on a mask layer; Affinity rasterises SVG masks, so it goes back in the SVG.
+    const svg = '<svg width="400" height="400" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg"><g id="FP_1"><mask id="m" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="100"><ellipse id="FP_2" cx="100" cy="50" rx="100" ry="50" fill="#D9D9D9"/></mask><g mask="url(#m)"><rect width="400" height="400" fill="#5A32FA"/></g></g></svg>';
+    const packet = effects => JSON.stringify({format: 'figma-affinity', version: 1, name: 'Mask', frame: {width: 400, height: 400}, svg, texts: [], warnings: [],
+        layers: [{marker: 'FP_1', name: 'Frame', type: 'FRAME', effects: []}, {marker: 'FP_2', name: 'Ellipse', type: 'ELLIPSE', effects}]});
+    const r = compile(packet([{type: 'LAYER_BLUR', radius: 20, visible: true}]));
+    assert.deepEqual(r.warnings, []); assert.equal(r.effects.length, 0);
+    assert.match(r.svg, /<ellipse id="FP_2"[^>]*filter="url\(#FigmaPasteMaskBlur1\)"/);
+    assert.match(r.svg, /<feGaussianBlur stdDeviation="10"\/>/);
+    assert.match(r.svg, /<mask id="m"[^>]*x="-30" y="-30" width="260" height="160"/);
+    assert.doesNotMatch(compile(packet([])).svg, /FigmaPasteMaskBlur/);
+});
+
+test('alpha masks are painted white so Affinity’s luminance masking keeps their opacity', () => {
+    const r = compile('<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">'
+        + '<mask id="a" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200"><path d="M0 0H100V100H0Z" fill="#A956E0"/><rect y="100" width="200" height="100" fill="url(#g)"/><circle cx="50" cy="50" r="10" fill="#FF000080"/></mask>'
+        + '<mask id="l" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200"><rect width="200" height="200" fill="#808080"/></mask>'
+        + '<g mask="url(#a)"><rect width="200" height="200" fill="#00f"/></g><g mask="url(#l)"><rect width="200" height="200" fill="#f00"/></g>'
+        + '<defs><linearGradient id="g" x1="0" y1="100" x2="0" y2="200" gradientUnits="userSpaceOnUse"><stop stop-color="#D9D9D9"/><stop offset="1" stop-color="#D9D9D9" stop-opacity="0"/></linearGradient></defs></svg>');
+    const alpha = r.svg.match(/<mask id="a"[\s\S]*?<\/mask>/)[0];
+    assert.match(alpha, /<path[^>]*fill="white"/); assert.match(alpha, /fill="url\(#FigmaPasteAlphaMask1\)"/);
+    assert.match(alpha, /<circle[^>]*fill="white"[^>]*fill-opacity="0.50196/);
+    assert.match(r.svg, /<linearGradient id="FigmaPasteAlphaMask1"[\s\S]*?stop-color="white" stop-opacity="1"[\s\S]*?stop-color="white" stop-opacity="0"/);
+    assert.match(r.svg, /<linearGradient id="g"[\s\S]*?stop-color="#D9D9D9"/); // the original gradient is untouched
+    assert.match(r.svg, /<mask id="l"[\s\S]*?fill="#808080"/); // luminance masks are left alone
+});
+
+test('Figma inside and outside strokes become native half-width aligned strokes', () => {
+    const d = 'M10 10H90V90H10Z';
+    const r = compile('<svg width="200" height="100" viewBox="0 0 200 100" xmlns="http://www.w3.org/2000/svg">'
+        + '<mask id="out" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100" fill="black"><rect fill="white" x="0" y="0" width="100" height="100"/><path d="' + d + '"/></mask>'
+        + '<path d="' + d + '" fill="#FF6105"/><path d="' + d + '" stroke="white" stroke-width="13.3" mask="url(#out)"/>'
+        + '<clipPath id="in"><rect x="110" y="10" width="80" height="80" rx="8"/></clipPath>'
+        + '<rect x="110" y="10" width="80" height="80" rx="8" stroke="#000" stroke-width="4" clip-path="url(#in)"/></svg>');
+    assert.deepEqual(r.strokeAlignments.map(p => p.alignment), ['Outside', 'Inside']);
+    assert.match(r.svg, /<path d="M10 10H90V90H10Z" stroke="white" stroke-width="6.65" id="FigmaPasteStroke1"\/>/);
+    assert.match(r.svg, /<rect x="110"[^>]*stroke-width="2" id="FigmaPasteStroke2"\/>/);
+    assert.deepEqual(r.warnings, []);
 });

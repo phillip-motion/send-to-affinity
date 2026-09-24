@@ -33,8 +33,8 @@ test('image fill opacity and vector outline remain separate',()=>{
     const group=all(parseXml(r.svg)).find(n=>n.attrs['data-figma-image-fill']);
     assert.equal(group.children[0].attrs.opacity,'.5');assert.equal(group.children[1].attrs.fill,'none');assert.equal(group.children[1].attrs.stroke,'#ff0000');
 });
-test('unsupported tiled patterns and path bounds are reported instead of guessing an image crop',()=>{
-    for(const s of [svg('<path d="M0 0H100V80H0Z" fill="url(#crop)"/>'),svg('<rect width="100" height="80" fill="url(#crop)"/>').replace('patternContentUnits="objectBoundingBox" width="1"','patternContentUnits="objectBoundingBox" width=".5"')]){
+test('unsupported tiled patterns and arc paths are reported instead of guessing an image crop',()=>{
+    for(const s of [svg('<path d="M0 0H100A10 10 0 0 1 100 80H0Z" fill="url(#crop)"/>'),svg('<rect width="100" height="80" fill="url(#crop)"/>').replace('patternContentUnits="objectBoundingBox" width="1"','patternContentUnits="objectBoundingBox" width=".5"')]){
         const r=compile(s);assert.equal(r.imageFills,0);assert.equal(r.assets.length,1);assert.ok(r.warnings.some(w=>/image fill couldn’t be converted/.test(w)));assert.match(r.svg,/fill="url\(#crop\)"/);
     }
 });
@@ -94,12 +94,56 @@ test('button negative spread becomes a clipped editable blur, with no duplicate 
     assert.ok(nodes.some(n=>n.tag==='clipPath'));assert.ok(nodes.some(n=>n.attrs['fill-rule']==='evenodd'));
     assert.ok(!r.warnings.some(w=>/shadow spread isn’t supported/i.test(w)));
     const unsupported=compile(source.replace(roundedButton,'<path d="M0 0L40 0L20 30Z"/>'));
-    assert.ok(unsupported.warnings.some(w=>/shadow spread isn’t supported/i.test(w)));
+    assert.ok(unsupported.warnings.some(w=>/negative shadow spread isn’t supported/i.test(w)));
 });
 test('new Figma hard-alpha and spread graphs retain their native shadow stack',()=>{
     const hard='<feColorMatrix in="SourceAlpha" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hard"/>';
     const tint='<feColorMatrix values="0 0 0 0 0.1 0 0 0 0 0.2 0 0 0 0 0.3 0 0 0 0.4 0"/>';
     const source='<svg><defs><filter id="f">'+hard+'<feOffset dx="3" dy="8"/><feGaussianBlur stdDeviation="4"/><feComposite in2="hard" operator="out"/>'+tint+'<feBlend in2="SourceGraphic" result="shape"/>'+hard+'<feMorphology in="SourceAlpha" operator="dilate" radius="2"/><feComposite in2="hard" operator="out"/>'+tint+'<feBlend in2="shape"/></filter></defs><rect width="50" height="50" filter="url(#f)"/></svg>';
     const out=compile(source),fx=out.effects[0].native;
-    assert.equal(fx.length,2);assert.equal(fx[0].dy,8);assert.equal(fx[0].opacity,.4);assert.equal(fx[1].spread,2);assert.ok(out.warnings.some(w=>/shadow spread is approximate/.test(w)));
+    assert.equal(fx.length,2);assert.equal(fx[0].dy,8);assert.equal(fx[0].opacity,.4);assert.equal(fx[1].spread,2);assert.ok(!out.warnings.some(w=>/spread/.test(w)));
+});
+test('positive spread maps to Affinity intensity for drop and inner shadows alike',()=>{
+    // sigma 2 → kernel radius 6; spread 4 → radius 10 with a 40% solid core.
+    for(const kind of ['outerShadow','innerShadow'])assert.deepEqual(affinityEffectSettings({kind,sigma:2,spread:4,dx:0,dy:3}),{radius:10,offset:3,angle:Math.PI/2,intensity:.4});
+});
+const tiled=require('node:fs').readFileSync(__dirname+'/fixtures/figma-image-tile.svg','utf8');
+test('Figma tiled image fills become repeating bitmap fills, one bitmap per tile',()=>{
+    const r=compile(tiled);
+    assert.deepEqual(r.warnings,[]);assert.equal(r.imageFills,0);
+    const [spec]=r.imageTiles;
+    // 400px shape, 0.25 tiles → 100px tiles; Affinity's bitmap spans −1…1 around the fill origin.
+    assert.deepEqual(spec.fillToSpread,[50,0,0,50,50,50]);assert.equal(spec.opacity,.5);
+    assert.match(r.svg.match(new RegExp('<rect[^>]*id="'+spec.marker+'"[^>]*>'))[0],/fill="none"/);assert.doesNotMatch(r.svg,/fill="url\(#pattern0\)"/);
+});
+test('tiled fill opacity is left to the user when a stroke would be dimmed with it',()=>{
+    const r=compile(tiled.replace('fill-opacity="0.5"','fill-opacity="0.5" stroke="#000"'));
+    assert.equal(r.imageTiles[0].opacity,null);assert.match(r.warnings.join('\n'),/tiled image fill’s opacity wasn’t applied/);
+});
+test('image fills on paths use the exact curve bounds, not the control points',()=>{
+    // A top-rounded card image, like Figma exports; its corner control points sit on the edges.
+    const r=compile(svg('<path d="M10 0H90C95.5 0 100 4.5 100 10V80H0V10C0 4.5 4.5 0 10 0Z" fill="url(#crop)"/>'));
+    assert.equal(r.imageFills,1);assert.deepEqual(r.warnings,[]);
+    assert.match(r.svg,/translate\(0 0\) scale\(100 80\)/);
+    // A bulging curve: control points reach y=-40, the curve itself only y=-30.
+    const bulge=compile(svg('<path d="M0 0C0 -40 100 -40 100 0V80H0Z" fill="url(#crop)"/>'));
+    assert.match(bulge.svg,/translate\(0 -30\) scale\(100 110\)/);
+});
+const spreadShadow=(content,extra='')=>'<svg width="400" height="400" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg"><g id="Card" filter="url(#s)">'+content+'</g>'+extra+'<defs><filter id="s" x="0" y="0" width="400" height="400" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/><feMorphology radius="20" operator="erode" in="SourceAlpha" result="effect1_dropShadow"/><feOffset dy="6"/><feGaussianBlur stdDeviation="24"/><feColorMatrix type="matrix" values="0 0 0 0 0.25 0 0 0 0 0.34 0 0 0 0 0.43 0 0 0 0.3 0"/><feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow"/><feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/></filter><clipPath id="c"><rect x="50" y="50" width="300" height="200" rx="30" fill="white"/></clipPath></defs></svg>';
+test('negative drop-shadow spread becomes an inset, blurred silhouette behind the layer',()=>{
+    for(const content of ['<rect x="50" y="50" width="300" height="200" rx="30" fill="#C4C4C4"/>','<g clip-path="url(#c)"><rect x="50" y="50" width="300" height="200" rx="30" fill="#C4C4C4"/><rect x="50" y="50" width="300" height="200" fill="#00f"/></g>']){
+        const r=compile(spreadShadow(content));
+        assert.deepEqual(r.warnings,[]);
+        const helper=r.effects.find(e=>/OuterSpread/.test(e.marker));
+        assert.deepEqual(helper.native,[{kind:'blur',sigma:24,countAs:'outerShadow'}]);
+        // Eroding a rounded rectangle by 20 insets it by 20 and shrinks its corners by 20.
+        assert.match(r.svg,new RegExp('<rect x="70" y="70" width="260" height="160" rx="10" ry="10" id="'+helper.marker+'" fill="rgb\\(64,87,110\\)" fill-opacity="0.3" transform="translate\\(0 6\\)"/>'));
+    }
+    // A silhouette that isn't one known shape keeps the warning.
+    const text=compile(spreadShadow('<rect x="50" y="50" width="300" height="200" fill="#C4C4C4"/><rect x="0" y="0" width="80" height="80" fill="#f00"/>'));
+    assert.match(text.warnings.join('\n'),/negative shadow spread isn’t supported/);
+});
+test('effects on an empty layer are dropped silently',()=>{
+    const r=compile(spreadShadow(''));
+    assert.deepEqual(r.warnings,[]);assert.equal(r.effects.length,0);assert.doesNotMatch(r.svg,/filter="url\(#s\)"/);
 });

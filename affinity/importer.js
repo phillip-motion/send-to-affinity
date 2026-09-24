@@ -363,7 +363,45 @@ function decodeImageBase64(value) {
     return result;
 }
 
-function prepareImages(root, warnings) {
+// Exact geometry bounds of SVG path data (objectBoundingBox excludes control
+// points), for image fills on Figma vector shapes. Arcs aren't needed for Figma
+// exports and fail so the fill is reported rather than misplaced.
+function pathBox(d) {
+    const tokens=String(d).match(/[a-df-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi) || [];
+    let i=0,x=0,y=0,sx=0,sy=0,cmd='',px=null,py=null;
+    const xs=[],ys=[],num=()=>{const v=Number(tokens[i++]);if(!Number.isFinite(v))fail('the image fill’s path could not be read');return v;};
+    const add=(ax,ay)=>{xs.push(ax);ys.push(ay);};
+    const extrema=(p0,p1,p2,p3,out)=>{ // cubic roots of the derivative, within (0,1)
+        const a=-p0+3*p1-3*p2+p3,b=2*(p0-2*p1+p2),c=p1-p0,ts=[];
+        if(Math.abs(a)<1e-12){if(Math.abs(b)>1e-12)ts.push(-c/b);}
+        else{const disc=b*b-4*a*c;if(disc>=0){ts.push((-b+Math.sqrt(disc))/(2*a),(-b-Math.sqrt(disc))/(2*a));}}
+        for(const t of ts)if(t>0 && t<1)out.push(t);
+    };
+    const cubic=(x1,y1,x2,y2,x3,y3)=>{
+        const ts=[];extrema(x,x1,x2,x3,ts);extrema(y,y1,y2,y3,ts);
+        for(const t of ts){const u=1-t;add(u*u*u*x+3*u*u*t*x1+3*u*t*t*x2+t*t*t*x3,u*u*u*y+3*u*u*t*y1+3*u*t*t*y2+t*t*t*y3);}
+        px=x2;py=y2;x=x3;y=y3;add(x,y);
+    };
+    while(i<tokens.length) {
+        if(/[a-z]/i.test(tokens[i]))cmd=tokens[i++];
+        else if(!cmd)fail('the image fill’s path could not be read');
+        const rel=cmd===cmd.toLowerCase(),C=cmd.toUpperCase(),ox=rel?x:0,oy=rel?y:0;
+        if(C==='M'){x=ox+num();y=oy+num();sx=x;sy=y;add(x,y);px=null;cmd=rel?'l':'L';}
+        else if(C==='L'){x=ox+num();y=oy+num();add(x,y);px=null;}
+        else if(C==='H'){x=ox+num();add(x,y);px=null;}
+        else if(C==='V'){y=oy+num();add(x,y);px=null;}
+        else if(C==='C'){const a=[num(),num(),num(),num(),num(),num()];cubic(ox+a[0],oy+a[1],ox+a[2],oy+a[3],ox+a[4],oy+a[5]);}
+        else if(C==='S'){const r=px==null?[x,y]:[2*x-px,2*y-py],a=[num(),num(),num(),num()];cubic(r[0],r[1],ox+a[0],oy+a[1],ox+a[2],oy+a[3]);}
+        else if(C==='Q'){const qx=ox+num(),qy=oy+num(),ex=ox+num(),ey=oy+num();cubic(x+2/3*(qx-x),y+2/3*(qy-y),ex+2/3*(qx-ex),ey+2/3*(qy-ey),ex,ey);}
+        else if(C==='Z'){x=sx;y=sy;px=null;}
+        else fail('the image fill’s path uses an unsupported command');
+    }
+    if(!xs.length)fail('the image fill’s path is empty');
+    const x0=Math.min(...xs),y0=Math.min(...ys);
+    return [x0,y0,Math.max(...xs)-x0,Math.max(...ys)-y0];
+}
+
+function prepareImages(root, warnings, packet) {
     const assets=[], byData=new Map(), ids=new Map();
     walk(root,n=>{if(n.attrs.id)ids.set(n.attrs.id,n);});
     walk(root,n=>{
@@ -381,24 +419,54 @@ function prepareImages(root, warnings) {
     });
     if(assets.length)root.attrs['xmlns:xlink']='http://www.w3.org/1999/xlink';
     let converted=0,serial=0;
-    const addedDefs=[];
+    const addedDefs=[],tiles=[];
+    const vb=(root.attrs.viewBox || '').trim().split(/[\s,]+/).map(Number);
+    const rootScaled=vb.length===4 && ((root.attrs.width && parseFloat(root.attrs.width)!==vb[2]) || (root.attrs.height && parseFloat(root.attrs.height)!==vb[3]));
+    // Figma "Tile" fills: one image scaled to exactly one repeat of the pattern.
+    // They become native repeating bitmap fills after import; SVG patterns don't load.
+    function tile(n,pattern,matrix) {
+        const p=pattern.attrs;
+        const contents=pattern.children.filter(c=>c.tag && !['title','desc'].includes(c.tag));
+        const use=contents[0], ref=use?.attrs.href || use?.attrs['xlink:href'];
+        const source=use?.tag==='use' && ref?.[0]==='#' ? ids.get(ref.slice(1)) : null;
+        const asset=source?.tag==='image' && assets.find(a=>'#'+a.token===(source.attrs.href || source.attrs['xlink:href']));
+        if(contents.length!==1 || !asset || !matrix || Number(use.attrs.x || 0)!==0 || Number(use.attrs.y || 0)!==0)fail('this tiled pattern is not supported');
+        const [sx,b,c,sy,e,f]=svgTransform(use.attrs.transform),iw=number(source.attrs.width,'image width'),ih=number(source.attrs.height,'image height');
+        const pw=number(p.width,'tile width'),ph=number(p.height,'tile height');
+        if(b || c || e || f || !(iw>0 && ih>0 && pw>0 && ph>0) || Math.abs(iw*sx/pw-1)>1e-3 || Math.abs(ih*sy/ph-1)>1e-3)fail('this tiled pattern is not supported');
+        const [x,y,w,h]=box(n);if(!(w>0 && h>0))fail('the image has empty bounds');
+        if(!n.attrs.id){let id='FigmaPasteTile'+(tiles.length+1);while(ids.has(id))id+='x';ids.set(id,n);n.attrs.id=id;}
+        // Affinity has no fill opacity for bitmap fills, so it becomes layer opacity,
+        // which only matches when nothing else (stroke, effects) is on the layer.
+        const fillOpacity=n.attrs['fill-opacity']==null ? 1 : number(n.attrs['fill-opacity'],'fill opacity');
+        const plain=!(n.attrs.stroke && n.attrs.stroke!=='none') && !n.attrs.filter;
+        if(fillOpacity!==1 && !plain)warn(warnings,layerName(packet,n.attrs.id)+': the tiled image fill’s opacity wasn’t applied. Set it in Affinity.');
+        // A bitmap fill spans −1…1 around the fill origin; one bitmap covers one tile.
+        const tw=pw*w,th=ph*h;
+        tiles.push({marker:n.attrs.id,token:asset.token,opacity:plain ? fillOpacity*(n.attrs.opacity==null ? 1 : number(n.attrs.opacity,'opacity')) : null,fillToSpread:multiplyAffine(matrix,[tw/2,0,0,th/2,x+tw/2,y+th/2])});
+        n.attrs.fill='none';delete n.attrs['fill-opacity'];
+        return n;
+    }
     function box(n){
         const a=n.attrs, num=(k,d=0)=>a[k]==null?d:number(a[k],k);
         if(n.tag==='rect')return [num('x'),num('y'),num('width'),num('height')];
         if(n.tag==='circle'){const r=num('r');return[num('cx')-r,num('cy')-r,2*r,2*r];}
         if(n.tag==='ellipse'){const rx=num('rx'),ry=num('ry');return[num('cx')-rx,num('cy')-ry,2*rx,2*ry];}
-        fail('only rectangle, rounded-rectangle, circle and ellipse image fills are currently rebuilt');
+        if(n.tag==='path')return pathBox(a.d || '');
+        fail('only rectangle, circle, ellipse and path image fills are currently rebuilt');
     }
-    function convert(parent){
+    function convert(parent,matrix){
         parent.children=parent.children.map(n=>{
             if(!n.tag)return n;
             if(n.tag==='defs')return n;
-            convert(n);
+            let own=null;try{own=matrix && multiplyAffine(matrix,svgTransform(n.attrs.transform));}catch(ignore){}
+            convert(n,own);
             const match=/^url\(\s*['"]?#([^'"\s)]+)['"]?\s*\)$/.exec(n.attrs.fill || '');
             const pattern=match && ids.get(match[1]);
             if(!pattern || pattern.tag!=='pattern')return n;
             try{
                 const p=pattern.attrs;
+                if((p.patternUnits || 'objectBoundingBox')==='objectBoundingBox' && p.patternContentUnits==='objectBoundingBox' && !p.patternTransform && !p.viewBox && !p.href && !p['xlink:href'] && Number(p.x || 0)===0 && Number(p.y || 0)===0 && (Number(p.width)!==1 || Number(p.height)!==1))return tile(n,pattern,own);
                 if((p.patternUnits || 'objectBoundingBox')!=='objectBoundingBox' || p.patternContentUnits!=='objectBoundingBox' || Number(p.width)!==1 || Number(p.height)!==1 || Number(p.x || 0)!==0 || Number(p.y || 0)!==0 || p.patternTransform || p.viewBox || p.href || p['xlink:href'])fail('this tiled or transformed pattern is not supported');
                 const contents=pattern.children.filter(c=>c.tag && !['title','desc'].includes(c.tag));
                 if(contents.length!==1 || !['use','image'].includes(contents[0].tag))fail('the pattern contains more than one image');
@@ -430,9 +498,9 @@ function prepareImages(root, warnings) {
             }catch(e){warn(warnings,'An image fill couldn’t be converted and may be missing. Check the images in Affinity.');return n;}
         });
     }
-    convert(root);
+    convert(root,rootScaled ? null : vb.length===4 ? [1,0,0,1,-vb[0],-vb[1]] : [1,0,0,1,0,0]);
     if(addedDefs.length){let defs=root.children.find(n=>n.tag==='defs');if(!defs){defs={tag:'defs',attrs:{},children:[]};root.children.push(defs);}defs.children.push(...addedDefs);}
-    return {assets,imageFills:converted};
+    return {assets,imageFills:converted,imageTiles:tiles};
 }
 
 // Affinity's SVG loader ignores local image hrefs. Embed one definition per
@@ -483,23 +551,83 @@ function omitFigmaBackdropHelpers(root, warnings, packet) {
         const clip=/^url\(#(bgblur_[\w.-]+_clip_path)\)$/.exec(style['clip-path'] || '');
         if(!blur || !clip || clips.get(clip[1])!==1)return false;
         const radius=next?.attrs?.['data-figma-bg-blur-radius'];
-        return next?.tag==='g' && numeric.test(radius) && Math.abs(Number(radius)-2*Number(blur[1]))<=0.02;
+        return !!next?.tag && numeric.test(radius) && Math.abs(Number(radius)-2*Number(blur[1]))<=0.02 && {blur:Number(blur[1]),clip:clip[1]};
     }
-    function visit(parent) {
+    // Background blur becomes an Affinity Gaussian Blur live filter behind the layer,
+    // masked to the frosted area. The mask is a white copy of Figma's blur clip shape,
+    // left where the helper was; the live filter is added around it after import.
+    const clipById=new Map();walk(root,n=>{if(n.tag==='clipPath' && n.attrs.id)clipById.set(n.attrs.id,n);});
+    const backdrops=[];let backdropSerial=0;
+    function backdropMask(node,found) {
+        const clip=clipById.get(found.clip),shapes=clip ? significant(clip.children).filter(c=>c.tag) : [];
+        if(shapes.length!==1 || !['rect','path','circle','ellipse'].includes(shapes[0].tag))return null;
+        const shape=shapes[0],attrs={...shape.attrs};delete attrs.id;delete attrs['clip-path'];delete attrs.style;
+        const transform=['translate('+node.attrs.x+' '+node.attrs.y+')',clip.attrs.transform,shape.attrs.transform].filter(Boolean).join(' ');
+        let id;do{id='FigmaPasteBackdrop'+(++backdropSerial);}while(clipById.has(id) || root.attrs.id===id);
+        Object.assign(attrs,{id,fill:'white',transform});delete attrs['fill-opacity'];delete attrs.opacity;delete attrs.stroke;
+        return {tag:shape.tag,attrs,children:[]};
+    }
+    // Figma renders angular/diamond gradients with an HTML helper group
+    // (data-figma-skip-parse) and describes the real paint as JSON on the next
+    // sibling. Drop the helper; angular paints are rebuilt as native conical
+    // gradients after import.
+    const ids=new Set(),angular=[];let serial=0;
+    walk(root,n=>{if(n.attrs.id)ids.add(n.attrs.id);});
+    const vb=(root.attrs.viewBox || '').trim().split(/[\s,]+/).map(Number);
+    const htmlOnly=node=>{let ok=true;walk(node,n=>{if(!['g','foreignObject','div'].includes(n.tag) || (n.tag==='div' && significant(n.children).length))ok=false;});return ok;};
+    function gradientHelper(node,next,matrix,owner) {
+        if(node.tag!=='g' || node.attrs['data-figma-skip-parse']!=='true' || !htmlOnly(node) || !next?.tag)return false;
+        let paint;try{paint=JSON.parse(next.attrs['data-figma-gradient-fill']);}catch(e){return false;}
+        if(!paint || !['GRADIENT_ANGULAR','GRADIENT_DIAMOND'].includes(paint.type))return false;
+        const name=layerName(packet,next.attrs.id || owner);
+        const stops=figmaGradientStops(paint);
+        delete next.attrs['data-figma-gradient-fill'];
+        if(stops){const [r,g,b,a]=stops[0].rgba;next.attrs.fill='rgb('+[r,g,b].map(v=>Math.round(v*255)).join(',')+')';next.attrs['fill-opacity']=String(a);}
+        const t=paint.transform,m=t && [t.m00,t.m10,t.m01,t.m11,t.m02,t.m12];
+        if(paint.type!=='GRADIENT_ANGULAR' || !stops || !matrix || !m?.every(Number.isFinite)) {
+            warn(warnings,name+': '+(paint.type==='GRADIENT_DIAMOND' ? 'diamond gradients aren’t supported. Recreate it in Affinity.' : 'check the angular gradient on this layer.'));
+            return true;
+        }
+        if(!next.attrs.id){let id;do{id='FigmaPasteAngular'+(++serial);}while(ids.has(id));ids.add(id);next.attrs.id=id;}
+        angular.push({marker:next.attrs.id,name,stops,gradientToSpread:multiplyAffine(matrix,m)});
+        return true;
+    }
+    function visit(parent,matrix=vb.length===4 ? [1,0,0,1,-vb[0],-vb[1]] : [1,0,0,1,0,0],owner) {
         const children=significant(parent.children),omitted=new Set();
         for(let i=0;i<children.length;i++) {
             const node=children[i];if(!node.tag)continue;
+            if(gradientHelper(node,children[i+1],matrix,owner)){omitted.add(node);continue;}
             if(node.tag.split(':').pop().toLowerCase()==='foreignobject') {
                 const next=children[i+1];
-                if(!recognized(node,next))fail('Embedded HTML (foreignObject) is not supported. Only Figma’s empty backdrop-blur helper can be skipped. No import has been started.');
-                const layer=packet?.layers.find(l=>l.marker===next.attrs.id);
-                warn(warnings,(layer?.name || 'A layer')+': background blur isn’t supported. Add it in Affinity if you need it.');
-                omitted.add(node);
-            } else visit(node);
+                const found=recognized(node,next);
+                if(!found)fail('Embedded HTML (foreignObject) is not supported. Only Figma’s empty backdrop-blur helper can be skipped. No import has been started.');
+                const layer=packet?.layers.find(l=>l.marker===next.attrs.id),name=layer?.name || 'A layer';
+                const mask=backdropMask(node,found);
+                if(mask){parent.children[parent.children.indexOf(node)]=mask;backdrops.push({marker:mask.attrs.id,radius:found.blur,name});}
+                else{warn(warnings,name+': background blur isn’t supported. Add it in Affinity if you need it.');omitted.add(node);}
+            } else {
+                let child=null;try{child=matrix && multiplyAffine(matrix,svgTransform(node.attrs.transform));}catch(ignore){}
+                visit(node,child,node.attrs.id || owner);
+            }
         }
         if(omitted.size)parent.children=parent.children.filter(n=>!omitted.has(n));
     }
     visit(root);
+    return {angular,backdrops};
+}
+
+// Figma angular gradients wrap from the last stop back to the first; Affinity's
+// conical gradient does not, so both ends get the colour where the wrap crosses 0°.
+function figmaGradientStops(paint) {
+    const opacity=paint.opacity ?? 1;
+    const stops=(paint.stops || []).map(s=>({position:s.position,rgba:[s.color?.r,s.color?.g,s.color?.b,(s.color?.a ?? 1)*opacity]}))
+        .filter(s=>[s.position,...s.rgba].every(v=>Number.isFinite(v) && v>=0 && v<=1)).sort((a,b)=>a.position-b.position);
+    if(!stops.length || stops.length!==(paint.stops || []).length)return null;
+    const first=stops[0],last=stops[stops.length-1],gap=1-last.position+first.position;
+    const t=gap>0 ? (1-last.position)/gap : 0,wrap=last.rgba.map((v,i)=>v+(first.rgba[i]-v)*t);
+    if(first.position>0)stops.unshift({position:0,rgba:wrap});
+    if(last.position<1)stops.push({position:1,rgba:wrap});
+    return stops;
 }
 
 function multiplyAffine(a,b) {
@@ -529,6 +657,109 @@ function svgTransform(value) {
 // Affinity imports a userSpaceOnUse text gradient in SVG coordinates, but its
 // glyph fill consumes text-local coordinates. Keep the native gradient's stops
 // and opacity; record the SVG coordinate system so it can be rebased after load.
+// Affinity's SVG loader scales em letter-spacing wrongly (−0.04em arrives as
+// −0.0048), so record each SVG text's tracking in em and set it after loading.
+function planTextTracking(root) {
+    const ids=new Set(),plans=[];let serial=0;
+    walk(root,n=>{if(n.attrs.id)ids.add(n.attrs.id);});
+    function em(value,fontSize) {
+        const m=/^(-?(?:\d+\.?\d*|\.\d+))(em|px)?$/.exec(String(value).trim());
+        if(!m)return null;
+        if(m[2]==='em')return Number(m[1]);
+        const size=parseFloat(fontSize);
+        return size>0 ? Number(m[1])/size : null;
+    }
+    function visit(node,spacing,fontSize) {
+        if(!node.tag || ['defs','clipPath','mask','symbol','pattern'].includes(node.tag))return;
+        spacing=node.attrs['letter-spacing'] ?? spacing;fontSize=node.attrs['font-size'] ?? fontSize;
+        if(node.tag==='text') {
+            const values=new Set();
+            (function spans(n,ls,fs){if(!n.tag)return;ls=n.attrs['letter-spacing'] ?? ls;fs=n.attrs['font-size'] ?? fs;values.add(ls==null || ls==='normal' ? 0 : em(ls,fs));n.children.forEach(c=>spans(c,ls,fs));})(node,spacing,fontSize);
+            const [value]=values;
+            if(values.size===1 && Number.isFinite(value) && value!==0) {
+                if(!node.attrs.id){let id;do{id='FigmaPasteText'+(++serial);}while(ids.has(id));ids.add(id);node.attrs.id=id;}
+                plans.push({marker:node.attrs.id,characterSpacing:value});
+            }
+            return;
+        }
+        node.children.forEach(c=>visit(c,spacing,fontSize));
+    }
+    visit(root,null,null);
+    return plans;
+}
+
+// Affinity's SVG loader ignores font-weight for variable fonts (Bold loads as
+// Regular), so record the requested face and switch to it after loading.
+function planTextFonts(root) {
+    const ids=new Set(),plans=[];let serial=0;
+    walk(root,n=>{if(n.attrs.id)ids.add(n.attrs.id);});
+    const weight=v=>v==null || v==='normal' ? 400 : v==='bold' ? 700 : /^\d{3}$/.test(v) ? Number(v) : null;
+    function visit(node,inherited) {
+        if(!node.tag || ['defs','clipPath','mask','symbol','pattern'].includes(node.tag))return;
+        const style=n=>({family:n.attrs['font-family'] ?? inherited?.family,weight:n.attrs['font-weight'] ?? inherited?.weight,italic:n.attrs['font-style'] ?? inherited?.italic});
+        const own=style(node);
+        if(node.tag==='text') {
+            const faces=new Set();
+            (function spans(n,s){if(!n.tag)return;s={family:n.attrs['font-family'] ?? s.family,weight:n.attrs['font-weight'] ?? s.weight,italic:n.attrs['font-style'] ?? s.italic};faces.add(JSON.stringify(s));n.children.forEach(c=>spans(c,s));})(node,own);
+            const [face]=[...faces].map(f=>JSON.parse(f));
+            const family=String(face?.family || '').split(',')[0].trim().replace(/^(['"])(.*)\1$/,'$2');
+            if(faces.size===1 && family && weight(face.weight)!=null) {
+                if(!node.attrs.id){let id;do{id='FigmaPasteFont'+(++serial);}while(ids.has(id));ids.add(id);node.attrs.id=id;}
+                plans.push({marker:node.attrs.id,family,weight:weight(face.weight),italic:/^(italic|oblique)/.test(face.italic || '')});
+            }
+            return;
+        }
+        node.children.forEach(c=>visit(c,own));
+    }
+    visit(root,null);
+    return plans;
+}
+
+const namedWeights={thin:100,hairline:100,extralight:200,ultralight:200,light:300,regular:400,normal:400,book:400,roman:400,medium:500,semibold:600,demibold:600,bold:700,extrabold:800,ultrabold:800,black:900,heavy:900};
+function fontFaceWeight(font,variable) {
+    // Variable families report 400 for every named instance; read the style name instead.
+    const style=String(font.postscriptName || '').split('-').pop().toLowerCase().replace(/italic|oblique/g,'');
+    return variable ? namedWeights[style || 'regular'] ?? font.weight : font.weight;
+}
+
+function restoreTextFonts(doc,plans) {
+    if(!plans.length)return;
+    const {StoryDelta}=require('/storydelta.js');
+    const {Selection}=require('/selections.js');
+    const {FontFamily}=require('/fonts.js');
+    const index=indexLayersByName(doc.layers.all.toArray()),families=new Map();
+    for(const plan of plans) {
+        try {
+            const matches=index.get(plan.marker) || [];
+            if(matches.length!==1)continue;
+            const texts=[];
+            (function visit(n){if(n.isTextNode)texts.push(n);else for(const c of n.children.toArray())visit(c);})(matches[0]);
+            const key=plan.family.toLowerCase();
+            if(!families.has(key))families.set(key,FontFamily.all.find(f=>f.name.toLowerCase()===key) || null);
+            const family=families.get(key);if(!family || !texts.length)continue;
+            const fonts=[...Array(family.fontCount)].map((_,i)=>family.getFont(i));
+            const target=fonts.find(f=>!!f.isItalic===plan.italic && fontFaceWeight(f,family.hasVariations)===plan.weight);
+            const wrong=texts.filter(t=>t.story.getGlyphAtts(t.storyRange.begin).font.postscriptName!==target?.postscriptName);
+            if(target && wrong.length)doc.formatText(StoryDelta.createPostscriptName(target.postscriptName),Selection.create(doc,wrong));
+        } catch(e) { /* ponytail: leave Affinity's face; missing fonts are reported separately. */ }
+    }
+}
+
+function restoreTextTracking(doc,plans,packet,warnings) {
+    if(!plans.length)return;
+    const {StoryDelta,GlyphAttDoubleType}=require('/storydelta.js');
+    const {Selection}=require('/selections.js');
+    const index=indexLayersByName(doc.layers.all.toArray());
+    for(const plan of plans) {
+        const matches=index.get(plan.marker) || [];
+        if(matches.length!==1)continue; // ponytail: text Affinity split or renamed keeps the loader's spacing.
+        const texts=[];
+        (function visit(n){if(n.isTextNode)texts.push(n);else for(const c of n.children.toArray())visit(c);})(matches[0]);
+        try{if(texts.length)doc.formatText(StoryDelta.createGlyphDouble(GlyphAttDoubleType.CharacterSpacing,plan.characterSpacing),Selection.create(doc,texts));}
+        catch(e){warn(warnings,layerName(packet,plan.marker)+': check the letter spacing on this text.');}
+    }
+}
+
 function planLinearTextGradients(root,warnings,packet) {
     const gradients=new Map(),ids=new Set(),plans=[];let serial=0;
     walk(root,n=>{if(n.attrs.id)ids.add(n.attrs.id);if(n.tag==='linearGradient' && n.attrs.id)gradients.set(n.attrs.id,n);});
@@ -586,10 +817,131 @@ function planLinearTextGradients(root,warnings,packet) {
     return plans;
 }
 
+// Figma's SVG export drops layer blurs on mask shapes, though Figma renders
+// them (a blurred mask ellipse gives a soft edge). Affinity imports SVG masks as
+// pixel masks, so the blur goes back into the SVG mask where the loader bakes it in.
+function bakeMaskBlurs(root,filters,packet) {
+    const inMask=new Set(),ids=new Set();let serial=0,defs=null;
+    walk(root,n=>{if(n.attrs.id)ids.add(n.attrs.id);if(n.tag==='mask')walk(n,c=>{if(c!==n)inMask.add(c);});});
+    if(!packet)return inMask;
+    const blurs=new Map();
+    for(const layer of packet.layers) {
+        const found=(layer.effects || []).filter(e=>e.type==='LAYER_BLUR' && e.visible!==false && (e.blurType || 'NORMAL')==='NORMAL' && Number.isFinite(e.radius) && e.radius>0);
+        if(found.length===1)blurs.set(layer.marker,found[0].radius/2);
+    }
+    walk(root,mask=>{
+        if(mask.tag!=='mask')return;
+        const num=k=>Number(mask.attrs[k]);
+        for(const shape of mask.children) {
+            const sigma=shape.tag && blurs.get(shape.attrs.id);
+            if(!sigma || shape.attrs.filter)continue;
+            let id;do{id='FigmaPasteMaskBlur'+(++serial);}while(ids.has(id));ids.add(id);
+            const filter={tag:'filter',attrs:{id,'color-interpolation-filters':'sRGB'},children:[{tag:'feGaussianBlur',attrs:{stdDeviation:String(sigma)},children:[]}]};
+            // Grow the mask and filter regions by 3σ so the soft edge isn't cropped. The filter
+            // region is relative to the shape's own box, which also holds for transformed shapes.
+            const pad=3*sigma,a=shape.attrs,size=shape.tag==='rect' ? [Number(a.width),Number(a.height)] : shape.tag==='circle' ? [2*a.r,2*a.r] : shape.tag==='ellipse' ? [2*a.rx,2*a.ry] : null;
+            const [fx,fy]=size && size.every(v=>v>0) ? size.map(v=>pad/v) : [.5,.5];
+            Object.assign(filter.attrs,{x:String(-fx),y:String(-fy),width:String(1+2*fx),height:String(1+2*fy)});
+            if(mask.attrs.maskUnits==='userSpaceOnUse' && ['x','y','width','height'].every(k=>Number.isFinite(num(k))))
+                Object.assign(mask.attrs,{x:String(num('x')-pad),y:String(num('y')-pad),width:String(num('width')+2*pad),height:String(num('height')+2*pad)});
+            if(!defs){defs=root.children.find(n=>n.tag==='defs');if(!defs){defs={tag:'defs',attrs:{},children:[]};root.children.push(defs);}}
+            defs.children.push(filter);filters.set(id,filter);
+            shape.attrs.filter='url(#'+id+')';
+        }
+    });
+    return inMask;
+}
+
+// Affinity's SVG loader applies every mask by luminance and ignores
+// mask-type:alpha. Figma's alpha masks are drawn in colours (#D9D9D9, or the
+// layer's own colour), so they came through 45–85% transparent. Paint alpha-mask
+// contents white, keeping their opacity, so luminance equals the intended alpha.
+function alphaMasksAsLuminance(root,warnings,packet) {
+    const ids=new Set(),gradients=new Map();let serial=0,defs=null;
+    walk(root,n=>{if(n.attrs.id)ids.add(n.attrs.id);if(/Gradient$/.test(n.tag) && n.attrs.id)gradients.set(n.attrs.id,n);});
+    const clone=n=>n.tag ? {tag:n.tag,attrs:{...n.attrs},children:n.children.map(clone)} : {...n};
+    function whiteGradient(id) {
+        const source=gradients.get(id),stops=source?.children.filter(c=>c.tag==='stop');
+        if(!stops?.length)return null;
+        const copy=clone(source);let newId;do{newId='FigmaPasteAlphaMask'+(++serial);}while(ids.has(newId));ids.add(newId);
+        copy.attrs.id=newId;
+        for(const stop of copy.children.filter(c=>c.tag==='stop')) {
+            // Keep each stop's alpha, including any alpha carried in its colour.
+            let alpha=Number(stop.attrs['stop-opacity'] ?? 1);
+            try{alpha*=colour(stop.attrs['stop-color'] || 'black').opacity;}catch(e){}
+            stop.attrs['stop-color']='white';stop.attrs['stop-opacity']=String(alpha);delete stop.attrs.style;
+        }
+        if(!defs){defs=root.children.find(c=>c.tag==='defs');if(!defs){defs={tag:'defs',attrs:{},children:[]};root.children.push(defs);}}
+        defs.children.push(copy);
+        return 'url(#'+newId+')';
+    }
+    function paint(n,key) {
+        const value=n.attrs[key];
+        if(value==null || value==='none')return;
+        const ref=/^url\(\s*['"]?#([^'"\s)]+)['"]?\s*\)/.exec(value);
+        if(ref){const white=whiteGradient(ref[1]);if(white)n.attrs[key]=white;return;}
+        let alpha=1;try{alpha=colour(value).opacity;}catch(e){}
+        n.attrs[key]='white';
+        if(alpha!==1)n.attrs[key+'-opacity']=String(alpha*Number(n.attrs[key+'-opacity'] ?? 1));
+    }
+    walk(root,mask=>{
+        if(mask.tag!=='mask' || !/mask-type\s*:\s*alpha/i.test(mask.attrs.style || '') && mask.attrs['mask-type']!=='alpha')return;
+        mask.attrs.fill='white'; // unfilled shapes would otherwise default to black
+        walk(mask,n=>{
+            if(n===mask)return;
+            if(n.tag==='image')warn(warnings,layerName(packet,n.attrs.id)+': an image used as a mask may look lighter or darker. Check it in Affinity.');
+            paint(n,'fill');paint(n,'stroke');
+        });
+    });
+}
+
+// Figma exports inside/outside strokes as a double-width centre stroke, clipped to
+// the shape (inside) or masked by "everything but the shape" (outside). Affinity's
+// SVG loader ignores that mask, drawing the full double width. Rebuild them as
+// native half-width Inside/Outside strokes instead.
+function planStrokeAlignment(root) {
+    const byId=new Map(),ids=new Set(),plans=[];let serial=0;
+    walk(root,n=>{if(n.attrs.id){byId.set(n.attrs.id,n);ids.add(n.attrs.id);}});
+    const ref=v=>/^url\(\s*['"]?#([^'"\s)]+)['"]?\s*\)$/.exec(v || '')?.[1];
+    const geometry=['d','x','y','width','height','rx','ry','cx','cy','r','transform'];
+    const same=(a,b)=>a?.tag===b?.tag && geometry.every(k=>(a.attrs[k] ?? '')===(b.attrs[k] ?? ''));
+    const drawn=n=>n.children.filter(c=>c.tag && !['title','desc'].includes(c.tag));
+    const black=(n,inherited)=>['black','#000','#000000'].includes(String(n.attrs.fill ?? inherited ?? 'black').toLowerCase());
+    walk(root,n=>{
+        const width=Number(n.attrs['stroke-width'] ?? 1);
+        if(!['path','rect','circle','ellipse'].includes(n.tag) || !n.attrs.stroke || n.attrs.stroke==='none' || !(width>0))return;
+        let alignment=null;
+        const mask=byId.get(ref(n.attrs.mask)),clip=byId.get(ref(n.attrs['clip-path']));
+        if(mask?.tag==='mask' && !n.attrs['clip-path']) {
+            const [cover,shape]=drawn(mask);
+            if(drawn(mask).length===2 && cover.tag==='rect' && ['white','#fff','#ffffff'].includes(String(cover.attrs.fill).toLowerCase()) && same(shape,n) && black(shape,mask.attrs.fill))alignment='Outside';
+        } else if(clip?.tag==='clipPath' && !n.attrs.mask && drawn(clip).length===1 && same(drawn(clip)[0],n))alignment='Inside';
+        if(!alignment)return;
+        delete n.attrs[alignment==='Outside' ? 'mask' : 'clip-path'];
+        n.attrs['stroke-width']=String(width/2);
+        if(!n.attrs.id){let id;do{id='FigmaPasteStroke'+(++serial);}while(ids.has(id));ids.add(id);n.attrs.id=id;}
+        plans.push({marker:n.attrs.id,alignment});
+    });
+    return plans;
+}
+
+function restoreStrokeAlignment(doc,plans,packet,warnings) {
+    if(!plans.length)return;
+    const {StrokeAlignment}=require('/commands.js');
+    const index=indexLayersByName(doc.layers.all.toArray());
+    for(const plan of plans) {
+        const matches=index.get(plan.marker) || [];
+        try{if(matches.length!==1)fail('not found');doc.setStrokeAlignment(StrokeAlignment[plan.alignment],matches[0]);}
+        catch(e){warn(warnings,layerName(packet,plan.marker)+': set this stroke to '+plan.alignment.toLowerCase()+' in Affinity.');}
+    }
+}
+
 function prepareSvg(svg, warnings, repairBlur, packet) {
     const root = parseXml(svg), filters = new Map(), effects = [];
-    omitFigmaBackdropHelpers(root,warnings,packet);
+    const {angular:angularGradients,backdrops}=omitFigmaBackdropHelpers(root,warnings,packet);
     promoteInlineStyles(root);
+    alphaMasksAsLuminance(root,warnings,packet);
+    const strokeAlignments=planStrokeAlignment(root);
     let texts=[];
     const textTargets=new Map();
     if (packet) {
@@ -622,8 +974,11 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
     const scaled = new Set(), rotated = new Set();
     function trackScale(n, inherited, inheritedRotation) {
         if (!n.tag) return;
-        const hasScale = inherited || /(?:scale|matrix|skewX|skewY)\s*\(/i.test(n.attrs.transform || '');
-        const hasRotation = inheritedRotation || /rotate\s*\(/i.test(n.attrs.transform || '');
+        // Rotations and flips at 100% keep blur radii exact; only real scale or skew needs manual conversion.
+        let m = null; try { m = svgTransform(n.attrs.transform); } catch (e) {}
+        const rigid = !!m && Math.abs(m[0]*m[0]+m[1]*m[1]-1) < 5e-3 && Math.abs(m[2]*m[2]+m[3]*m[3]-1) < 5e-3 && Math.abs(m[0]*m[2]+m[1]*m[3]) < 5e-3;
+        const hasScale = inherited || !rigid;
+        const hasRotation = inheritedRotation || (rigid && (Math.abs(m[1]) > 1e-9 || m[0] < 0 || m[3] < 0));
         if (hasScale) scaled.add(n);
         if (hasRotation) rotated.add(n);
         n.children.forEach(child => trackScale(child, hasScale, hasRotation));
@@ -646,9 +1001,44 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
         }
         if (n.tag === 'filter' && n.attrs.id) filters.set(n.attrs.id, n);
     });
-    const images=prepareImages(root,warnings);
+    const images=prepareImages(root,warnings,packet);
+    const inMask=bakeMaskBlurs(root,filters,packet);
     let serial = 0;
+    const clipPaths=new Map();walk(root,c=>{if(c.tag==='clipPath' && c.attrs.id)clipPaths.set(c.attrs.id,c);});
+    const drawn=c=>c.tag && !['title','desc','defs','mask','clipPath'].includes(c.tag);
+    const drawable=n=>{let found=false;walk(n,c=>{if(['path','rect','circle','ellipse','line','polyline','polygon','text','image','use'].includes(c.tag))found=true;});return found;};
+    const opaqueShape=c=>['rect','path','circle','ellipse'].includes(c?.tag) && !c.attrs.transform && !c.attrs.filter && !c.attrs.mask && !c.attrs['clip-path']
+        && (c.attrs.opacity==null || Number(c.attrs.opacity)===1) && (c.attrs['fill-opacity']==null || Number(c.attrs['fill-opacity'])===1)
+        && c.attrs.fill && c.attrs.fill!=='none' && !/^url\(/.test(c.attrs.fill) && (()=>{try{return colour(c.attrs.fill).opacity===1;}catch(e){return false;}})();
+    const sameShape=(a,b)=>a.tag===b.tag && ['d','x','y','width','height','rx','ry','cx','cy','r'].every(k=>(a.attrs[k] ?? '')===(b.attrs[k] ?? ''));
+    // The shadow-casting silhouette, when it is one known opaque shape: a lone shape, or
+    // a Figma frame whose clipped content starts with a background matching its clip.
+    function outerSilhouette(n) {
+        const kids=n.children.filter(drawn);
+        if(kids.length===1 && opaqueShape(kids[0]))return kids[0];
+        const clip=kids.length===1 && kids[0].tag==='g' && !kids[0].attrs.transform && clipPaths.get(/^url\(#([^)]+)\)$/.exec(kids[0].attrs['clip-path'] || '')?.[1]);
+        const clipShape=clip && clip.children.filter(drawn),first=clip && kids[0].children.filter(drawn)[0];
+        return clipShape?.length===1 && opaqueShape(first) && sameShape(first,clipShape[0]) ? first : null;
+    }
+    function insetShape(shape,d) {
+        const a=shape.attrs,num=(k,f=0)=>a[k]==null ? f : Number(a[k]);
+        if(shape.tag==='rect') {
+            const w=num('width'),h=num('height');if(!(w>2*d && h>2*d))return null;
+            const rx=Math.max(0,num('rx',num('ry'))-d),ry=Math.max(0,num('ry',num('rx'))-d);
+            return {tag:'rect',attrs:{x:String(num('x')+d),y:String(num('y')+d),width:String(w-2*d),height:String(h-2*d),...(rx||ry ? {rx:String(rx),ry:String(ry)} : {})},children:[]};
+        }
+        if(shape.tag==='circle' || shape.tag==='ellipse') {
+            const rx=shape.tag==='circle' ? num('r') : num('rx'),ry=shape.tag==='circle' ? num('r') : num('ry');if(!(rx>d && ry>d))return null;
+            return {tag:'ellipse',attrs:{cx:String(num('cx')),cy:String(num('cy')),rx:String(rx-d),ry:String(ry-d)},children:[]};
+        }
+        // ponytail: other paths scale inward about their centre; close to erosion once blurred, not exact for concave shapes.
+        const [x,y,w,h]=pathBox(a.d || '');if(!(w>2*d && h>2*d))return null;
+        const cx=x+w/2,cy=y+h/2;
+        return {tag:'path',attrs:{d:a.d,...(a['fill-rule'] ? {'fill-rule':a['fill-rule']} : {}),transform:'translate('+cx+' '+cy+') scale('+(w-2*d)/w+' '+(h-2*d)/h+') translate('+(-cx)+' '+(-cy)+')'},children:[]};
+    }
     walk(root, n => {
+        if (inMask.has(n)) return; // Affinity rasterises masks, so SVG filters inside them are baked in.
+        if (n.attrs.filter && !drawable(n)) { delete n.attrs.filter; return; } // an empty layer casts nothing
         const ref = /^url\(\s*['"]?#([^'"\s)]+)['"]?\s*\)$/.exec(n.attrs.filter || '');
         if (!ref) {
             if (n.attrs.style && /filter\s*:/.test(n.attrs.style)) warn(warnings, layerName(packet,n.attrs.id)+': an effect couldn’t be converted. Check it in Affinity.');
@@ -679,8 +1069,9 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
             if (visible.length !== 1 || visible[0].attrs.filter) break;
             target = visible[0];
         }
-        if (scaled.has(target)) { warn(warnings, lost); return; }
-        if (rotated.has(target) && plan.some(e => e.kind !== 'blur')) { warn(warnings, lost); return; }
+        // Affinity draws effects in page space, so only the filtered node's own space matters,
+        // not transforms on the shapes inside it (verified with scaled and skewed children).
+        if (rotated.has(n) && plan.some(e => e.kind !== 'blur')) { warn(warnings, lost); return; }
         const visible=n.tag==='g' ? n.children.filter(c=>c.tag && !['title','desc','defs'].includes(c.tag)) : [];
         const silhouette=visible[0];
         // Recognize a background rectangle followed by label text (Figma buttons).
@@ -700,8 +1091,22 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
             target=n;
             return false;
         });
-        if(plan.some(e=>e.spread>0))warn(warnings,layerName(packet,n.attrs.id)+': shadow spread is approximate. Compare the shadow in Affinity.');
-        if(plan.some(e=>e.spread<0))warn(warnings,layerName(packet,n.attrs.id)+': shadow spread isn’t supported here. Adjust the shadow in Affinity.');
+        // Negative drop-shadow spread erodes the silhouette before blurring. Affinity's
+        // intensity can only grow a shadow, so draw the eroded silhouette as a blurred
+        // vector behind the layer instead: exact for rectangles and ellipses.
+        if(plan.length===1 && plan[0].kind==='outerShadow' && plan[0].spread<0 && !plan[0].knocksOut) {
+            const effect=plan[0],shape=outerSilhouette(n),inset=shape && insetShape(shape,-effect.spread);
+            if(inset) {
+                let helper;do{helper='FigmaPasteOuterSpread'+(++serial);}while(svg.includes(helper));
+                Object.assign(inset.attrs,{id:helper,fill:'rgb('+effect.rgb.map(c=>Math.round(c*255)).join(',')+')','fill-opacity':String(effect.opacity),
+                    transform:'translate('+effect.dx+' '+effect.dy+')'+(inset.attrs.transform ? ' '+inset.attrs.transform : '')});
+                n.children.unshift(inset);
+                effects.push({marker:helper,name:'Drop shadow (spread '+effect.spread+' px)',native:[{kind:'blur',sigma:effect.sigma,countAs:'outerShadow'}]});
+                plan=[];target=n;
+            }
+        }
+        // Affinity's intensity can only grow a shadow; negative spread would need the silhouette shrunk first.
+        if(plan.some(e=>e.spread<0))warn(warnings,layerName(packet,n.attrs.id)+': negative shadow spread isn’t supported. Adjust the shadow in Affinity.');
         let marker = target.attrs.id;
         if (!marker) do { marker = 'FigmaPasteBlur' + (++serial); } while (svg.includes(marker));
         const name = n.attrs.id || target.attrs.id || (target.tag === 'ellipse' ? 'Blurred ellipse' : 'Blurred ' + target.tag);
@@ -727,8 +1132,9 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
         return !delegated;
     });
     const linearTextGradients=planLinearTextGradients(root,warnings,packet);
+    const textTracking=planTextTracking(root),textFonts=planTextFonts(root);
     const artboards=packet?.artboards ? prepareArtboards(root,packet.artboards) : [];
-    return {svg: xml(root), effects, texts, artboards, linearTextGradients, ...images};
+    return {svg: xml(root), effects, texts, artboards, linearTextGradients, angularGradients, backdrops, textTracking, textFonts, strokeAlignments, ...images};
 }
 
 // Keep a stable outer group even for empty frames and frames containing one
@@ -809,6 +1215,21 @@ function indexLayersByName(nodes) {
     return index;
 }
 
+// Affinity places a frame's first baseline by its own ascent rule, which can sit
+// well above Figma's (0.42 em for Canva Sans). The SVG text is on Figma's exact
+// baseline, so while both exist, shift the frame along its own y axis until their
+// glyph ink lines up. Only when the ink boxes match in size, i.e. the same layout.
+function alignFirstBaseline(doc,created,original,m) {
+    const {Transform}=require('/geometry.js');
+    const {DocumentCommand}=require('/commands.js');
+    const {Selection}=require('/selections.js');
+    const a=created.getExactSpreadVisibleBox(),b=original.getExactSpreadVisibleBox();
+    if(![a,b].every(r=>r && [r.x,r.y,r.width,r.height].every(Number.isFinite)) || Math.abs(a.width-b.width)>1 || Math.abs(a.height-b.height)>1)return;
+    const [,,c,d]=m,len2=c*c+d*d,k=((b.x-a.x)*c+(b.y-a.y)*d)/len2;
+    if(!(len2>0) || Math.abs(k)*Math.sqrt(len2)<0.01)return;
+    doc.executeCommand(DocumentCommand.createTransform(Selection.create(doc,created),Transform.createTranslate(k*c,k*d),{}));
+}
+
 function rebuildTextFrames(doc, specs, warnings) {
     if (!specs.length) return 0;
     const {StoryBuilder}=require('/storybuilder.js');
@@ -872,6 +1293,7 @@ function rebuildTextFrames(doc, specs, warnings) {
             const command=builder.createCommand(); doc.executeCommand(command); created=command.newNodes[0];
             if (!created || !created.isTextNode || created.text!==text.characters) fail('Affinity did not retain the complete editable text.');
             doc.executeCommand(DocumentCommand.createMoveNodes(created.selfSelection,original[0],NodeMoveType.Before,NodeChildType.Main));
+            alignFirstBaseline(doc,created,original[0],text.transform);
             if (typeof text.opacity==='number' && text.opacity!==1) doc.setOpacity(text.opacity,created);
             // Keep SVG artwork until its replacement is complete and verified.
             original[0].delete(); rebuilt++; created=null;
@@ -914,6 +1336,76 @@ function restoreLinearTextGradients(doc,specs,warnings) {
     return restored;
 }
 
+function restoreAngularGradients(doc,specs,warnings) {
+    if(!specs.length)return 0;
+    const {GradientFill,GradientFillType,FillDescriptor,BlendMode}=require('/fills.js');
+    const {Gradient,Colour}=require('/colours.js');
+    const {Transform}=require('/geometry.js');
+    const index=indexLayersByName(doc.layers.all.toArray());let restored=0;
+    for(const spec of specs) {
+        try {
+            const matches=index.get(spec.marker) || [];
+            if(matches.length!==1)fail('could not uniquely identify the imported layer');
+            const gradient=Gradient.create(spec.stops.map(s=>{const [r,g,b,alpha]=s.rgba.map(v=>Math.round(v*255));return {colour:Colour.createRGBA8({r,g,b,alpha}),position:s.position,midpoint:.5,smoothness:0};}));
+            // Figma's angular centre is the middle of its unit square; Affinity's conical centre is the origin.
+            const world=new Transform(),m=multiplyAffine(spec.gradientToSpread,[1,0,0,1,.5,.5]);
+            [m[0],m[2],m[4],m[1],m[3],m[5]].forEach((v,i)=>{world.data[i]=v;});
+            const transform=matches[0].baseToSpreadTransform.inverted.multiply(world);
+            doc.setBrushFillDescriptor(FillDescriptor.create(GradientFill.create(gradient,GradientFillType.Conical),true,transform,BlendMode.Normal,false),matches[0]);
+            restored++;
+        } catch(e){warn(warnings,spec.name+': check the angular gradient on this layer.');}
+    }
+    return restored;
+}
+
+function restoreImageTiles(doc,tiles,assets,assetFolder,packet,warnings) {
+    if(!tiles.length)return 0;
+    const {BitmapFill,FillDescriptor,BlendMode,RasterExtendType,RasterResamplerType}=require('/fills.js');
+    const {Bitmap}=require('/rasterobject.js');
+    const {Transform}=require('/geometry.js');
+    const index=indexLayersByName(doc.layers.all.toArray()),bitmaps=new Map();let restored=0;
+    for(const spec of tiles) {
+        try {
+            const matches=index.get(spec.marker) || [],asset=assets.find(a=>a.token===spec.token);
+            if(matches.length!==1 || !asset || !assetFolder)fail('could not identify the imported layer');
+            if(!bitmaps.has(asset.token))bitmaps.set(asset.token,Bitmap.loadFromFile(assetFolder+'/'+asset.filename));
+            // Affinity's Repeat stretches edge pixels; Wrap is what tiles.
+            const fill=BitmapFill.create(bitmaps.get(asset.token),RasterExtendType.Wrap,RasterResamplerType.Default,false);
+            const world=new Transform(),m=spec.fillToSpread;
+            [m[0],m[2],m[4],m[1],m[3],m[5]].forEach((v,i)=>{world.data[i]=v;});
+            doc.setBrushFillDescriptor(FillDescriptor.create(fill,true,matches[0].baseToSpreadTransform.inverted.multiply(world),BlendMode.Normal,false),matches[0]);
+            if(spec.opacity!=null && spec.opacity!==1)doc.setOpacity(spec.opacity,matches[0]);
+            restored++;
+        } catch(e){warn(warnings,layerName(packet,spec.marker)+': the tiled image fill couldn’t be applied. Add it in Affinity.');}
+    }
+    return restored;
+}
+
+function restoreBackdrops(doc,specs,warnings) {
+    if(!specs.length)return;
+    const {GaussianBlurFilterParameters,GaussianBlurFilterRasterNodeDefinition,NodeChildType}=require('/nodes.js');
+    const {AddChildNodesCommandBuilder,DocumentCommand,InsertionMode,NodeMoveType}=require('/commands.js');
+    const {Selection}=require('/selections.js');
+    const index=indexLayersByName(doc.layers.all.toArray());
+    for(const spec of specs) {
+        const matches=index.get(spec.marker) || [];
+        try {
+            if(matches.length!==1)fail('mask not found');
+            // Live filter radius equals the CSS blur, i.e. half Figma's background blur (checked against Chrome).
+            const params=GaussianBlurFilterParameters.create();params.radius=spec.radius;
+            const builder=AddChildNodesCommandBuilder.create();builder.setInsertionTarget(matches[0]);builder.setInsertionMode(InsertionMode.Behind);
+            builder.addNode(GaussianBlurFilterRasterNodeDefinition.create(params));
+            const command=builder.createCommand(false);doc.executeCommand(command);
+            const filter=command.newNodes[0];if(!filter)fail('Affinity did not create the live filter');
+            doc.executeCommand(DocumentCommand.createMoveNodes(Selection.create(doc,matches[0]),filter,NodeMoveType.Inside,NodeChildType.Enclosure));
+            filter.userDescription=spec.name+' background blur';
+        } catch(e) {
+            if(matches.length===1)try{matches[0].delete();}catch(ignore){}
+            warn(warnings,spec.name+': background blur couldn’t be added. Add a Gaussian Blur live filter in Affinity.');
+        }
+    }
+}
+
 function affinityBlurRadius(effect) {
     return Number.isFinite(effect.figmaRadius) ? effect.figmaRadius/2 : effect.sigma;
 }
@@ -921,6 +1413,8 @@ function affinityBlurRadius(effect) {
 // Affinity 3.3: Gaussian Blur's panel displays SDK radius / 3. The
 // shadow panels display the SDK radius directly, but render the same kernel.
 // Verified with panel values and matching rendered edge profiles, not getters.
+// Spread maps to intensity: Affinity's shadow is a solid core of intensity × radius
+// with the blur falloff over the rest, so radius = blur + spread and intensity = spread / radius.
 function affinityEffectSettings(effect) {
     const kernelRadius = 3 * affinityBlurRadius(effect);
     if (effect.kind === 'blur') return {radius: kernelRadius};
@@ -1017,8 +1511,14 @@ function importPrepared(result, folder) {
     if (!loaded || !loaded.document) fail('Affinity could not open the generated SVG. Source: ' + path);
     const doc = new Document(loaded.document), warnings = result.warnings.slice();
     timings.loadMs=Date.now()-stage;stage=Date.now();
+    restoreStrokeAlignment(doc,result.strokeAlignments || [],result.packet,warnings);
+    restoreTextFonts(doc,result.textFonts || []);
+    restoreTextTracking(doc,result.textTracking || [],result.packet,warnings);
     const textFrames=rebuildTextFrames(doc,result.texts || [],warnings);
     const linearGradientTextLayers=restoreLinearTextGradients(doc,result.linearTextGradients || [],warnings);
+    restoreAngularGradients(doc,result.angularGradients || [],warnings);
+    restoreBackdrops(doc,result.backdrops || [],warnings);
+    const imageTiles=restoreImageTiles(doc,result.imageTiles || [],assets,assetFolder,result.packet,warnings);
     timings.textMs=Date.now()-stage;stage=Date.now();
     const nodes = indexLayersByName(doc.layers.all.toArray());
     let repaired = 0;
@@ -1074,7 +1574,7 @@ function importPrepared(result, folder) {
     }
     const textLayers=doc.layers.all.toArray().filter(node=>node.isTextNode).length;
     const imageLayers=doc.layers.all.toArray().filter(node=>node.isImageNode || node.isRasterNode).length;
-    if(assets.length && !imageLayers)warn(warnings,'Images may be missing. The originals were saved to '+assetFolder+'.');
+    if(assets.length && !imageLayers && !imageTiles)warn(warnings,'Images may be missing. The originals were saved to '+assetFolder+'.');
     doc.enumerateFontNames((name,installed)=>{if(!installed) warn(warnings,'“'+name+'” isn’t installed in Affinity. Install it so the text looks the same.');return require('affinity:common').EnumerationResult.Continue;});
     console.log('Figma Paste:', result.type, 'source:', path, 'editable effects:', repaired, 'text frames:', textFrames, 'warnings:', warnings);
     timings.finishMs=Date.now()-stage;timings.totalMs=Date.now()-started;
