@@ -1,0 +1,180 @@
+{
+  "format": "figma-affinity",
+  "version": 1,
+  "name": "Editable text example",
+  "frame": {
+    "width": 720,
+    "height": 420
+  },
+  "svg": "<svg width=\"720\" height=\"420\" viewBox=\"0 0 720 420\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"720\" height=\"420\" fill=\"#f7f5f0\"/><g id=\"FP_2\"><text x=\"48\" y=\"86\" font-family=\"Arial\" font-size=\"38\">Made to </text><text x=\"193\" y=\"86\" font-family=\"Arial\" font-size=\"38\" font-weight=\"bold\">edit.</text></g><g transform=\"translate(20 10)\" id=\"FP_3\"><text id=\"FP_4\" x=\"28\" y=\"160\" font-family=\"Arial\" font-size=\"22\"><tspan x=\"28\" y=\"160\">Keep the words, colours and styles.</tspan><tspan x=\"28\" y=\"194\">A second line stays editable.</tspan></text></g></svg>",
+  "layers": [
+    {
+      "marker": "FP_2",
+      "name": "Headline",
+      "type": "TEXT"
+    },
+    {
+      "marker": "FP_3",
+      "name": "Copy group",
+      "type": "GROUP"
+    },
+    {
+      "marker": "FP_4",
+      "name": "Body copy",
+      "type": "TEXT"
+    }
+  ],
+  "texts": [
+    {
+      "marker": "FP_2",
+      "name": "Headline",
+      "characters": "Made to edit.",
+      "width": 620,
+      "height": 58,
+      "transform": [
+        1,
+        0,
+        0,
+        1,
+        48,
+        48
+      ],
+      "textAlignHorizontal": "LEFT",
+      "textAlignVertical": "TOP",
+      "textAutoResize": "WIDTH_AND_HEIGHT",
+      "runs": [
+        {
+          "characters": "Made to ",
+          "start": 0,
+          "end": 8,
+          "fontName": {
+            "family": "Arial",
+            "style": "Regular"
+          },
+          "fontSize": 38,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "SOLID",
+              "color": {
+                "r": 0.14,
+                "g": 0.19,
+                "b": 0.15
+              },
+              "opacity": 1
+            }
+          ],
+          "textDecoration": "NONE",
+          "textCase": "ORIGINAL",
+          "letterSpacing": {
+            "unit": "PIXELS",
+            "value": 0
+          },
+          "lineHeight": {
+            "unit": "PIXELS",
+            "value": 48
+          },
+          "paragraphSpacing": 0,
+          "listOptions": {
+            "type": "NONE"
+          }
+        },
+        {
+          "characters": "edit.",
+          "start": 8,
+          "end": 13,
+          "fontName": {
+            "family": "Arial",
+            "style": "Bold"
+          },
+          "fontSize": 38,
+          "fontWeight": 700,
+          "fills": [
+            {
+              "type": "SOLID",
+              "color": {
+                "r": 0.14,
+                "g": 0.19,
+                "b": 0.15
+              },
+              "opacity": 1
+            }
+          ],
+          "textDecoration": "NONE",
+          "textCase": "ORIGINAL",
+          "letterSpacing": {
+            "unit": "PIXELS",
+            "value": 0
+          },
+          "lineHeight": {
+            "unit": "PIXELS",
+            "value": 48
+          },
+          "paragraphSpacing": 0,
+          "listOptions": {
+            "type": "NONE"
+          }
+        }
+      ],
+      "opacity": 1
+    },
+    {
+      "marker": "FP_4",
+      "name": "Body copy",
+      "characters": "Keep the words, colours and styles.\nA second line stays editable.",
+      "width": 620,
+      "height": 135,
+      "transform": [
+        1,
+        0,
+        0,
+        1,
+        48,
+        140
+      ],
+      "textAlignHorizontal": "LEFT",
+      "textAlignVertical": "TOP",
+      "textAutoResize": "HEIGHT",
+      "runs": [
+        {
+          "characters": "Keep the words, colours and styles.\nA second line stays editable.",
+          "start": 0,
+          "end": 65,
+          "fontName": {
+            "family": "Arial",
+            "style": "Regular"
+          },
+          "fontSize": 22,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "SOLID",
+              "color": {
+                "r": 0.14,
+                "g": 0.19,
+                "b": 0.15
+              },
+              "opacity": 1
+            }
+          ],
+          "textDecoration": "NONE",
+          "textCase": "ORIGINAL",
+          "letterSpacing": {
+            "unit": "PIXELS",
+            "value": 0
+          },
+          "lineHeight": {
+            "unit": "PIXELS",
+            "value": 34
+          },
+          "paragraphSpacing": 0,
+          "listOptions": {
+            "type": "NONE"
+          }
+        }
+      ],
+      "opacity": 1
+    }
+  ],
+  "warnings": []
+}

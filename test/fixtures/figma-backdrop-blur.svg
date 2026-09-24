@@ -1,0 +1,12 @@
+<svg width="640" height="360" viewBox="0 0 640 360" xmlns="http://www.w3.org/2000/svg">
+<rect width="640" height="360" fill="#7521F3"/>
+<rect x="300" width="340" height="360" fill="#0BD6FF"/>
+<foreignObject x="0" y="0" width="640" height="360"><div xmlns="http://www.w3.org/1999/xhtml" style="backdrop-filter:blur(20px);clip-path:url(#bgblur_1_2_clip_path);height:100%;width:100%"></div></foreignObject>
+<g id="FP_2" filter="url(#shadow)" data-figma-bg-blur-radius="40">
+<rect x="80" y="100" width="480" height="160" rx="30" fill="#F6F6F6" fill-opacity="0.36"/>
+</g>
+<defs>
+<clipPath id="bgblur_1_2_clip_path"><rect x="80" y="100" width="480" height="160" rx="30"/></clipPath>
+<filter id="shadow"><feDropShadow dx="0" dy="6" stdDeviation="4" flood-color="#000000" flood-opacity="0.15"/></filter>
+</defs>
+</svg>

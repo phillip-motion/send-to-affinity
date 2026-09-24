@@ -1,0 +1,17 @@
+{
+  "name": "Send to Affinity",
+  "id": "send-to-affinity",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": [
+      "http://localhost:6767"
+    ],
+    "reasoning": "Send the selected design directly to the Affinity SDK running on this computer. No remote servers are used."
+  }
+}

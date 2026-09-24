@@ -1,0 +1,15 @@
+{
+  "name": "send-to-affinity",
+  "private": true,
+  "version": "0.6.2",
+  "description": "Send Figma designs to Affinity with editable text, images and native effects",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "dev": "node --watch-path=figma-plugin --watch-path=affinity scripts/build.js",
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

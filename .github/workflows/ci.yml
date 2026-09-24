@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: npm run build
+      # Tagged builds (npm version patch && git push --follow-tags) become a release with the plugin attached.
+      - if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cd dist && zip -r "../send-to-affinity-${GITHUB_REF_NAME}.zip" . && cd ..
+          gh release create "$GITHUB_REF_NAME" "send-to-affinity-${GITHUB_REF_NAME}.zip" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
