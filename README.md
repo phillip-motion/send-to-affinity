@@ -35,6 +35,7 @@ Photos fully hidden under an opaque image fill are left out automatically, so se
 | Image fills, including tiled | Embedded images at original resolution, with crops kept; tiles repeat natively |
 | Layer blur, drop shadow, inner shadow | Native Gaussian Blur, Outer Shadow and Inner Shadow, with spread |
 | Background blur | A Gaussian Blur live filter masked to the layer |
+| Progressive blur | A tilt-shift Depth of Field live filter inside the layer |
 | Masks | Pixel masks, with Figma's alpha masks and blurred mask edges kept |
 | Inside and outside strokes | Native inside and outside stroke alignment |
 

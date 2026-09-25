@@ -222,7 +222,30 @@ test('Figma inside and outside strokes become native half-width aligned strokes'
         + '<clipPath id="in"><rect x="110" y="10" width="80" height="80" rx="8"/></clipPath>'
         + '<rect x="110" y="10" width="80" height="80" rx="8" stroke="#000" stroke-width="4" clip-path="url(#in)"/></svg>');
     assert.deepEqual(r.strokeAlignments.map(p => p.alignment), ['Outside', 'Inside']);
+    // The plugin's export writes inside strokes as a mask of the shape itself, in white.
+    const masked = compile('<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><mask id="in" fill="white"><path fill-rule="evenodd" d="' + d + '"/></mask>'
+        + '<path fill-rule="evenodd" d="' + d + '" stroke="#fff" stroke-opacity="0.5" stroke-width="4.2" mask="url(#in)"/></svg>');
+    assert.deepEqual(masked.strokeAlignments.map(p => p.alignment), ['Inside']);
+    assert.match(masked.svg, /stroke-width="2.1" id="FigmaPasteStroke1"\/>/); assert.doesNotMatch(masked.svg, /mask="url\(#in\)"/);
     assert.match(r.svg, /<path d="M10 10H90V90H10Z" stroke="white" stroke-width="6.65" id="FigmaPasteStroke1"\/>/);
     assert.match(r.svg, /<rect x="110"[^>]*stroke-width="2" id="FigmaPasteStroke2"\/>/);
     assert.deepEqual(r.warnings, []);
+});
+
+test('Figma progressive blur is left out of the uniform layer blur and rebuilt as a live filter', () => {
+    const svg = '<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><g id="FP_1"><g id="FP_2" filter="url(#f)"><rect x="50" y="50" width="100" height="100" fill="#111"/></g></g>'
+        + '<defs><filter id="f" x="-100" y="-100" width="400" height="400" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur stdDeviation="10" result="b"/></filter></defs></svg>';
+    const packet = blur => JSON.stringify({format: 'figma-affinity', version: 1, name: 'Blur', frame: {width: 200, height: 200}, svg, texts: [], warnings: [],
+        layers: [{marker: 'FP_1', name: 'Frame', type: 'FRAME', effects: []}, {marker: 'FP_2', name: 'Soft', type: 'GROUP', effects: [blur]}]});
+    const progressive = compile(packet({type: 'LAYER_BLUR', blurType: 'PROGRESSIVE', radius: 20, startRadius: 4, startOffset: {x: 0.5, y: 0}, endOffset: {x: 0.5, y: 1}, visible: true}));
+    assert.equal(progressive.effects.length, 0); assert.deepEqual(progressive.warnings, []);
+    const [spec] = progressive.progressiveBlurs;
+    assert.match(progressive.svg, new RegExp('<g id="' + spec.wrapper + '"><rect[^>]*id="' + spec.marker + '"'));
+    assert.deepEqual(progressive.progressiveBlurs.map(({marker, wrapper, frame, ...rest}) => rest), [{name: 'Soft', radius: 20, startRadius: 4, start: [0.5, 0], end: [0.5, 1]}]);
+    assert.equal(spec.frame, null); // no Figma frame sent: fall back to the imported layer's bounds
+    const framed = JSON.parse(packet({type: 'LAYER_BLUR', blurType: 'PROGRESSIVE', radius: 20, startRadius: 0, startOffset: {x: 0, y: 0}, endOffset: {x: 1, y: 1}, visible: true}));
+    Object.assign(framed.layers[1], {width: 120, height: 80, transform: [1, 0, 0, 1, 40, 60]});
+    assert.deepEqual(compile(JSON.stringify(framed)).progressiveBlurs[0].frame, {width: 120, height: 80, transform: [1, 0, 0, 1, 40, 60]});
+    const uniform = compile(packet({type: 'LAYER_BLUR', radius: 20, visible: true}));
+    assert.equal(uniform.effects.length, 1); assert.equal(uniform.progressiveBlurs.length, 0);
 });

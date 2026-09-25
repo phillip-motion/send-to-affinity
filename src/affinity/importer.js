@@ -914,10 +914,13 @@ function planStrokeAlignment(root) {
         const mask=byId.get(ref(n.attrs.mask)),clip=byId.get(ref(n.attrs['clip-path']));
         if(mask?.tag==='mask' && !n.attrs['clip-path']) {
             const [cover,shape]=drawn(mask);
-            if(drawn(mask).length===2 && cover.tag==='rect' && ['white','#fff','#ffffff'].includes(String(cover.attrs.fill).toLowerCase()) && same(shape,n) && black(shape,mask.attrs.fill))alignment='Outside';
+            const white=(e,inherited)=>['white','#fff','#ffffff'].includes(String(e?.attrs.fill ?? inherited ?? 'black').toLowerCase());
+            if(drawn(mask).length===2 && cover.tag==='rect' && white(cover) && same(shape,n) && black(shape,mask.attrs.fill))alignment='Outside';
+            // Figma's inside stroke as a mask: just the shape itself, in white.
+            else if(drawn(mask).length===1 && same(cover,n) && white(cover,mask.attrs.fill))alignment='Inside';
         } else if(clip?.tag==='clipPath' && !n.attrs.mask && drawn(clip).length===1 && same(drawn(clip)[0],n))alignment='Inside';
         if(!alignment)return;
-        delete n.attrs[alignment==='Outside' ? 'mask' : 'clip-path'];
+        delete n.attrs[n.attrs.mask ? 'mask' : 'clip-path'];
         n.attrs['stroke-width']=String(width/2);
         if(!n.attrs.id){let id;do{id='FigmaPasteStroke'+(++serial);}while(ids.has(id));ids.add(id);n.attrs.id=id;}
         plans.push({marker:n.attrs.id,alignment});
@@ -1004,7 +1007,7 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
     const images=prepareImages(root,warnings,packet);
     const inMask=bakeMaskBlurs(root,filters,packet);
     let serial = 0;
-    const clipPaths=new Map();walk(root,c=>{if(c.tag==='clipPath' && c.attrs.id)clipPaths.set(c.attrs.id,c);});
+    const clipPaths=new Map(),progressiveBlurs=[];walk(root,c=>{if(c.tag==='clipPath' && c.attrs.id)clipPaths.set(c.attrs.id,c);});
     const drawn=c=>c.tag && !['title','desc','defs','mask','clipPath'].includes(c.tag);
     const drawable=n=>{let found=false;walk(n,c=>{if(['path','rect','circle','ellipse','line','polyline','polygon','text','image','use'].includes(c.tag))found=true;});return found;};
     const opaqueShape=c=>['rect','path','circle','ellipse'].includes(c?.tag) && !c.attrs.transform && !c.attrs.filter && !c.attrs.mask && !c.attrs['clip-path']
@@ -1062,6 +1065,12 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
         if(figmaBlurs.length===1 && Number.isFinite(figmaBlurs[0].radius) && figmaBlurs[0].radius>=0){
             const blur=plan.find(e=>e.kind==='blur');if(blur)blur.figmaRadius=figmaBlurs[0].radius;
         }
+        // Figma's SVG export flattens a progressive blur to one uniform blur at its end
+        // radius. Leave it out of the layer effects; a live filter with a transparency
+        // gradient rebuilds the fade after import.
+        const point=v=>Number.isFinite(v?.x) && Number.isFinite(v?.y);
+        const progressive=figmaBlurs.length===1 && figmaBlurs[0].blurType==='PROGRESSIVE' && figmaBlurs[0].radius>0 && point(figmaBlurs[0].startOffset) && point(figmaBlurs[0].endOffset) ? figmaBlurs[0] : null;
+        if(progressive)plan=plan.filter(e=>e.kind!=='blur');
         // Rename the target, not a disposable one-child group: Affinity flattens those groups.
         let target = n;
         while (target.tag === 'g' && textTargets.get(target.attrs.id)!==target && !target.attrs['data-figma-image-fill']) {
@@ -1113,6 +1122,16 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
         target.attrs.id = marker;
         delete n.attrs.filter;
         if(plan.length)effects.push({marker, name, sigma: plan[0].sigma, native: plan});
+        if(progressive) {
+            // Affinity draws layer effects after a layer's child filters, so a filter inside the
+            // layer would leave its inner shadows sharp. Wrap the layer and blur the wrapper instead.
+            let parent=null;walk(root,p=>{if(!parent && p.children.includes(target))parent=p;});
+            let wrapper;do{wrapper='FigmaPasteProgressive'+(++serial);}while(svg.includes(wrapper));
+            if(parent)parent.children[parent.children.indexOf(target)]={tag:'g',attrs:{id:wrapper},children:[target]};
+            const frame=layer?.width>0 && layer?.height>0 && Array.isArray(layer.transform) && layer.transform.length===6 && layer.transform.every(Number.isFinite) ? {width:layer.width,height:layer.height,transform:layer.transform} : null;
+            progressiveBlurs.push({marker,wrapper:parent ? wrapper : marker,frame,name:layerName(packet,n.attrs.id),radius:progressive.radius,startRadius:Math.max(0,Math.min(progressive.radius,progressive.startRadius || 0)),
+                start:[progressive.startOffset.x,progressive.startOffset.y],end:[progressive.endOffset.x,progressive.endOffset.y]});
+        }
     });
     texts=texts.filter(text=>{
         let delegated=false;
@@ -1134,7 +1153,7 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
     const linearTextGradients=planLinearTextGradients(root,warnings,packet);
     const textTracking=planTextTracking(root),textFonts=planTextFonts(root);
     const artboards=packet?.artboards ? prepareArtboards(root,packet.artboards) : [];
-    return {svg: xml(root), effects, texts, artboards, linearTextGradients, angularGradients, backdrops, textTracking, textFonts, strokeAlignments, ...images};
+    return {svg: xml(root), effects, texts, artboards, linearTextGradients, angularGradients, backdrops, progressiveBlurs, textTracking, textFonts, strokeAlignments, ...images};
 }
 
 // Keep a stable outer group even for empty frames and frames containing one
@@ -1381,6 +1400,51 @@ function restoreImageTiles(doc,tiles,assets,assetFolder,packet,warnings) {
     return restored;
 }
 
+// Progressive blur: a tilt-shift Depth of Field live filter nested at the top of the
+// layer, so it blurs only that layer: sharp at Figma's start point, reaching the full
+// radius at its end point. Its radius equals Figma's (both are 2σ, checked against the
+// Gaussian live filter). Figma's offsets are fractions of the layer's own bounds.
+function restoreProgressiveBlurs(doc,specs,warnings) {
+    if(!specs.length)return;
+    const {DepthOfFieldFilterParameters,DepthOfFieldFilterRasterNodeDefinition}=require('/nodes.js');
+    const {AddChildNodesCommandBuilder,InsertionMode}=require('/commands.js');
+    const index=indexLayersByName(doc.layers.all.toArray());
+    const apply=(m,[x,y])=>[m[0]*x+m[1]*y+m[2],m[3]*x+m[4]*y+m[5]]; // Transform.data is [a,c,e,b,d,f]
+    const invert=m=>{const det=m[0]*m[4]-m[1]*m[3];return [m[4]/det,-m[1]/det,(m[1]*m[5]-m[4]*m[2])/det,-m[3]/det,m[0]/det,(m[3]*m[2]-m[0]*m[5])/det];};
+    for(const spec of specs) {
+        try {
+            const matches=index.get(spec.marker) || [],holders=index.get(spec.wrapper) || [];
+            if(matches.length!==1 || holders.length!==1)fail('layer not found');
+            const node=matches[0],holder=holders[0],box=node.baseBox,local=Array.from(node.baseToSpreadTransform.data);
+            // Figma's own layer frame when the plugin sent it (SVG coordinates, which are the page's).
+            const f=spec.frame,at=f ? ([u,v])=>{const [a,b,c,d,e,g]=f.transform;return [a*u*f.width+c*v*f.height+e,b*u*f.width+d*v*f.height+g];}
+                : ([u,v])=>apply(local,[box.x+u*box.width,box.y+v*box.height]);
+            function definition(space) {
+                const [x0,y0]=apply(space,at(spec.start)),[x1,y1]=apply(space,at(spec.end)),dx=x1-x0,dy=y1-y0,length=Math.hypot(dx,dy);
+                if(length<1e-6)fail('the blur has no length');
+                // A non-zero start radius: begin the ramp before the start so it matches there.
+                const lead=spec.startRadius>0 ? spec.startRadius*length/(spec.radius-spec.startRadius || 1e-6) : 0;
+                const params=DepthOfFieldFilterParameters.create();
+                params.radius=Math.min(1024,spec.radius); // setting tiltShiftParams selects tilt-shift mode
+                params.tiltShiftParams={position:{x:x0-dx/length*lead,y:y0-dy/length*lead},rotation:Math.PI/2-Math.atan2(dy,dx), // 0 blurs toward +y; Affinity's angle runs the other way to atan2
+                    top:-1e6,inFocusTop:-1e6+1,inFocusBottom:0.001,bottom:length+lead};
+                return DepthOfFieldFilterRasterNodeDefinition.create(params);
+            }
+            const add=space=>{
+                const builder=AddChildNodesCommandBuilder.create();builder.setInsertionTarget(holder);builder.setInsertionMode(InsertionMode.Inside_AtBack); // top of the wrapper, above the layer and its effects
+                builder.addNode(definition(space));const command=builder.createCommand(false);doc.executeCommand(command);
+                const filter=command.newNodes[0];if(!filter)fail('Affinity did not create the live filter');return filter;
+            };
+            let filter=add([1,0,0,0,1,0]);
+            // The filter's settings are in its own coordinates; redo it there if that isn't the page.
+            const own=Array.from(filter.baseToSpreadTransform.data);
+            if(own.some((v,i)=>Math.abs(v-[1,0,0,0,1,0][i])>1e-9)){filter.delete();filter=add(invert(own));}
+            filter.userDescription=spec.name+' progressive blur';
+            if(holder!==node)holder.userDescription=spec.name;
+        } catch(e){warn(warnings,spec.name+': the progressive blur couldn’t be rebuilt. Add a Depth of Field live filter in Affinity.');}
+    }
+}
+
 function restoreBackdrops(doc,specs,warnings) {
     if(!specs.length)return;
     const {GaussianBlurFilterParameters,GaussianBlurFilterRasterNodeDefinition,NodeChildType}=require('/nodes.js');
@@ -1518,6 +1582,7 @@ function importPrepared(result, folder) {
     const linearGradientTextLayers=restoreLinearTextGradients(doc,result.linearTextGradients || [],warnings);
     restoreAngularGradients(doc,result.angularGradients || [],warnings);
     restoreBackdrops(doc,result.backdrops || [],warnings);
+    restoreProgressiveBlurs(doc,result.progressiveBlurs || [],warnings);
     const imageTiles=restoreImageTiles(doc,result.imageTiles || [],assets,assetFolder,result.packet,warnings);
     timings.textMs=Date.now()-stage;stage=Date.now();
     const nodes = indexLayersByName(doc.layers.all.toArray());

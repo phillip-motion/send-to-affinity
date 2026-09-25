@@ -176,7 +176,12 @@ async function exportSelection(api, progress, options={}) {
             const marker='FP_'+(++serial);
             copy.name=marker;
             if(source.visible===false) return;
-            layers.push({marker,name:source.name,type:source.type,effects:plain(source.effects) || []});
+            const record={marker,name:source.name,type:source.type,effects:plain(source.effects) || []};
+            // Progressive blur points are fractions of Figma's own layer bounds, which Affinity's
+            // imported bounds don't always match, so send the real frame for those layers.
+            if(record.effects.some(e=>e && e.blurType==='PROGRESSIVE') && source.width>0 && source.height>0 && source.absoluteTransform)
+                Object.assign(record,{width:source.width,height:source.height,transform:multiply(origin,matrix(source.absoluteTransform))});
+            layers.push(record);
             if(source.type==='TEXT') {
                 try {
                     const record=textRecord(source,marker,origin);
