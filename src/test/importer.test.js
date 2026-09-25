@@ -140,6 +140,30 @@ test('background blur retains transfer artboards and names the affected layer',(
     assert.deepEqual(r.warnings,[]);assert.equal(r.backdrops[0].name,'Dock Background');
     assert.ok(r.effects.find(e=>e.name==='FP_2'));
 });
+test('glass rides the transfer packet, since Figma never puts it in the SVG',()=>{
+    const glassEffect={type:'GLASS',visible:true,lightIntensity:0.8,lightAngle:-45,refraction:0.7,depth:20,dispersion:0.35,radius:5,splay:0};
+    const packet={format:'figma-affinity',version:1,name:'Glass',frame:{width:200,height:200},
+        svg:'<svg width="200" height="200"><rect id="FP_1" width="200" height="200"/></svg>',warnings:[],texts:[],
+        layers:[{marker:'FP_1',name:'Glass Panel',effects:[glassEffect]}]};
+    const r=compile(JSON.stringify(packet));
+    assert.equal(r.glass.length,1);
+    assert.equal(r.glass[0].name,'Glass Panel');
+    assert.equal(r.glass[0].refraction,0.7);
+    assert.equal(r.glass[0].dispersion,0.35);
+    assert.equal(r.glass[0].fillless,false);
+    assert.deepEqual(r.warnings,[]);
+    packet.layers[0].glassFillless=true;
+    assert.equal(compile(JSON.stringify(packet)).glass[0].fillless,true);
+});
+test('glass eclipsed by an earlier background blur on the same layer is dropped, matching Figma',()=>{
+    const svg='<svg width="200" height="200"><rect id="FP_1" width="200" height="200"/></svg>';
+    const eclipsed={format:'figma-affinity',version:1,name:'Glass',frame:{width:200,height:200},svg,warnings:[],texts:[],
+        layers:[{marker:'FP_1',name:'Glass Panel',effects:[{type:'BACKGROUND_BLUR',visible:true,radius:10},{type:'GLASS',visible:true,refraction:0.7}]}]};
+    assert.equal(compile(JSON.stringify(eclipsed)).glass.length,0);
+    const visible={format:'figma-affinity',version:1,name:'Glass',frame:{width:200,height:200},svg,warnings:[],texts:[],
+        layers:[{marker:'FP_1',name:'Glass Panel',effects:[{type:'GLASS',visible:true,refraction:0.7},{type:'BACKGROUND_BLUR',visible:true,radius:10}]}]};
+    assert.equal(compile(JSON.stringify(visible)).glass.length,1);
+});
 test('XML entities, self-closing SVG and internal references are accepted', () => {
     const r = compile('<svg width="10" height="10"><title>A &amp; B</title><defs><linearGradient id="g"/></defs><rect fill="url(#g)"/></svg>');
     assert.equal(elements(parseXml(r.svg), 'title')[0].children[0].text, 'A & B');

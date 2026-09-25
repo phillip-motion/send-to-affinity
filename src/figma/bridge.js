@@ -90,4 +90,16 @@ function readImportResult(output) {
     if(!result.documentId)throw new Error('Affinity returned an incomplete import report.');
     return result;
 }
-if(typeof module==='object')module.exports={AffinityConnection,nativeImportScript,readImportResult};
+// "Layer: message" warnings sharing a message become one entry naming the first
+// two layers. Split at the last ": " since layer names may contain one.
+const sentence=text=>text.charAt(0).toUpperCase()+text.slice(1);
+function groupWarnings(warnings) {
+    const groups=new Map();
+    for(const warning of warnings) {
+        const at=warning.lastIndexOf(': '),name=at>0 ? warning.slice(0,at) : '',message=at>0 ? warning.slice(at+2) : warning;
+        if(!groups.has(message))groups.set(message,[]);
+        if(name && !groups.get(message).includes(name))groups.get(message).push(name);
+    }
+    return [...groups].map(([message,names])=>({layers:names.slice(0,2).join(', ')+(names.length>2 ? ' + '+(names.length-2)+' more' : ''),message:sentence(message)}));
+}
+if(typeof module==='object')module.exports={AffinityConnection,nativeImportScript,readImportResult,groupWarnings};
