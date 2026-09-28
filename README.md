@@ -6,7 +6,7 @@ Everything runs locally. The Figma plugin talks to Affinity's built-in MCP serve
 
 ## Install
 
-**Requirements:** Affinity 3.3 or later, and the Figma desktop app.
+**Requirements:** Affinity 3.3 or later, and the Figma desktop app
 
 1. **Affinity:** go to **Settings → Model Context Protocol** and turn on both **Enable Affinity MCP** and **Access Files on your Desktop**. Images are saved alongside each import.
 2. **Figma:** download this repo (**Code → Download ZIP**) or the latest [release](https://github.com/phillip-motion/send-to-affinity/releases), and unzip it. In Figma desktop, go to **Plugins → Development → Import plugin from manifest…** and choose **`figma-plugin/manifest.json`**.
