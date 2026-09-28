@@ -38,6 +38,7 @@ Photos fully hidden under an opaque image fill are left out automatically, so se
 | Progressive blur | A tilt-shift Depth of Field live filter inside the layer |
 | Masks | Pixel masks, with Figma's alpha masks and blurred mask edges kept |
 | Inside and outside strokes | Native inside and outside stroke alignment |
+| Glass | An approximation: a baked frost-and-refraction image behind the layer, plus a Bevel/Emboss rim light, for any shape. Dispersion is only partly reproduced |
 
 Not converted (reported as warnings): diamond gradients, auto layout, other filters, and text with image fills or strokes. Install the same fonts in both apps. Text wrapping can differ slightly between them.
 

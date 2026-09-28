@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const vm=require('node:vm');
-const {AffinityConnection,nativeImportScript,readImportResult}=require('../figma/bridge.js');
+const {AffinityConnection,nativeImportScript,readImportResult,groupWarnings}=require('../figma/bridge.js');
 
 function transport({endpoint='/message?sessionId=test',reply,failFetch=false}={}) {
     let stream;const sent=[];
@@ -103,11 +103,11 @@ function panel(tool) {
         if(!elements.has(id))elements.set(id,{hidden:false,textContent:'',getBoundingClientRect:()=>({bottom:84}),classList:{toggle(){},remove(){}},replaceChildren(...nodes){this.textContent=nodes.map(n=>n.textContent).join('');}});
         return elements.get(id);
     };
-    const context={document:{getElementById:element,createElement:()=>({}),createTextNode:textContent=>({textContent}),body:{},documentElement:{scrollHeight:106},body:{}},
+    const context={document:{getElementById:element,createElement:()=>({textContent:'',append(...nodes){this.textContent+=nodes.map(n=>typeof n==='string' ? n : n.textContent || '').join('');}}),createTextNode:textContent=>({textContent}),body:{},documentElement:{scrollHeight:106},body:{}},
         parent:{postMessage:m=>posted.push(JSON.parse(JSON.stringify(m.pluginMessage)))},window:{addEventListener(){}},
         ResizeObserver:class {observe(){}},timers,setTimeout:fn=>timers.push(fn),clearTimeout(){},
         AffinityConnection:class {async connect(){} tool(){return tool;} close(){}},
-        nativeImportScript:()=>'',readImportResult};
+        nativeImportScript:()=>'',readImportResult,groupWarnings};
     const html=fs.readFileSync(path.join(__dirname,'../figma/ui.html'),'utf8');
     const script=html.slice(html.indexOf('<script>')+8,html.lastIndexOf('</script>')).replace('/* NATIVE_IMPORTER_AND_BRIDGE */',"const NATIVE_IMPORTER='';");
     vm.createContext(context);vm.runInContext(script,context);
@@ -125,10 +125,14 @@ test('changing selection during send preserves completion and re-enables Send',a
     await receive({type:'selection',selectionId:'second',valid:true,label:'2 frames selected'});
     finish('FIGMA_PASTE_RESULT:'+JSON.stringify({documentId:'native',name:'First',imageLayers:1,textLayers:2,warnings:['Font missing'],timings:{compileMs:1,importMs:1}}));
     await running;
-    assert.equal(element('status').textContent,'Done');assert.equal(element('status').className,'success');
+    assert.equal(element('status').textContent,'Done!');assert.equal(element('status').className,'reviewed');
     timers.at(-1)();assert.equal(element('status').textContent,'2 frames selected');
-    assert.equal(element('review').hidden,false);
+    assert.equal(element('review').hidden,false);assert.equal(element('warnings').textContent,'Font missing');
     assert.equal(element('send').disabled,false);
+    await receive({type:'selection',selectionId:'second',valid:true,label:'2 frames selected'});
+    assert.equal(element('review').hidden,false,'the same selection keeps its review');
+    await receive({type:'selection',selectionId:'third',valid:true,label:'1 layer selected'});
+    assert.equal(element('review').hidden,true,'another selection clears it');
 });
 test('errors show a short title with formatted instructions below',async()=>{
     const {element,receive}=panel();
@@ -137,4 +141,14 @@ test('errors show a short title with formatted instructions below',async()=>{
     assert.equal(element('detail').textContent,'Go to Settings and turn on Enable Affinity MCP.');assert.equal(element('detail').hidden,false);
     await receive({type:'selection',selectionId:'a',valid:true,label:'1 layer selected'});
     assert.equal(element('detail').hidden,true);
+});
+
+test('warnings sharing a message collapse into one entry naming the first two layers',()=>{
+    const dispersion='glass dispersion is an approximation. Fine-tune the edge colour in Affinity if needed.';
+    const groups=groupWarnings(['Frame 60: '+dispersion,'Frame 56: '+dispersion,'Button: Primary: '+dispersion,'Frame 56: '+dispersion,'Logo: check the angular gradient on this layer.','Images were left out.']);
+    assert.deepEqual(groups,[
+        {layers:'Frame 60, Frame 56 + 1 more',message:'Glass dispersion is an approximation. Fine-tune the edge colour in Affinity if needed.'},
+        {layers:'Logo',message:'Check the angular gradient on this layer.'},
+        {layers:'',message:'Images were left out.'}]);
+    assert.equal(groupWarnings(['A: x.','B: x.'])[0].layers,'A, B');
 });

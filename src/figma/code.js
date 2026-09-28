@@ -172,14 +172,40 @@ async function exportSelection(api, progress, options={}) {
         timings.cloneMs=Date.now()-started;
         const metadataStarted=Date.now();
         let serial=0;
+        // Figma's glass effect has no SVG representation at all (unlike background
+        // blur), so it can only travel through this JSON metadata. Figma itself
+        // renders only the first of GLASS/BACKGROUND_BLUR it finds on a layer, so
+        // mirror that: a BACKGROUND_BLUR earlier in the list means glass is not
+        // actually visible, and neither should warn about the other.
+        function visibleGlass(effects) {
+            for(const e of effects) {
+                if(!e || e.visible===false) continue;
+                if(e.type==='GLASS') return e;
+                if(e.type==='BACKGROUND_BLUR') return null;
+            }
+            return null;
+        }
         function visit(source, copy) {
             const marker='FP_'+(++serial);
             copy.name=marker;
             if(source.visible===false) return;
             const record={marker,name:source.name,type:source.type,effects:plain(source.effects) || []};
-            // Progressive blur points are fractions of Figma's own layer bounds, which Affinity's
-            // imported bounds don't always match, so send the real frame for those layers.
-            if(record.effects.some(e=>e && e.blurType==='PROGRESSIVE') && source.width>0 && source.height>0 && source.absoluteTransform)
+            const glass=visibleGlass(record.effects);
+            // Glass is rebuilt in Affinity from the metadata above; keep whatever Figma
+            // might export for it out of the SVG. (A feTurbulence filter in the export
+            // is Figma's separate Texture effect, which this doesn't touch.)
+            if(Array.isArray(copy.effects) && copy.effects.some(e=>e && e.type==='GLASS'))
+                copy.effects=copy.effects.filter(e=>!e || e.type!=='GLASS');
+            // Figma leaves fill-less shapes out of the SVG, and glass is often on exactly
+            // those. A 1% stand-in fill keeps the geometry; Affinity removes it again.
+            if(glass && Array.isArray(copy.fills) && !copy.fills.some(p=>p && p.visible!==false && (p.opacity==null || p.opacity>0))) {
+                copy.fills=[{type:'SOLID',color:{r:1,g:1,b:1},opacity:0.01}];
+                record.glassFillless=true;
+            }
+            // Progressive blur points and glass's own displacement are both fractions/effects
+            // of Figma's own layer bounds, which Affinity's imported bounds don't always
+            // match, so send the real frame for those layers.
+            if((record.effects.some(e=>e && e.blurType==='PROGRESSIVE') || glass) && source.width>0 && source.height>0 && source.absoluteTransform)
                 Object.assign(record,{width:source.width,height:source.height,transform:multiply(origin,matrix(source.absoluteTransform))});
             layers.push(record);
             if(source.type==='TEXT') {
@@ -190,6 +216,7 @@ async function exportSelection(api, progress, options={}) {
                 } catch(e) { /* ponytail: SVG text is used instead, still editable. */ }
             }
             if(Array.isArray(source.effects)) for(const e of source.effects) {
+                if(e.visible!==false && e.type==='GLASS') continue; // handled above; a GLASS eclipsed by an earlier BACKGROUND_BLUR is silently dropped by Figma too
                 if(e.visible!==false && !['LAYER_BLUR','DROP_SHADOW','INNER_SHADOW'].includes(e.type)) warnings.push(source.name+': '+(e.type==='BACKGROUND_BLUR' ? 'background blur' : e.type.toLowerCase().replace(/_/g,' ')+' effect')+' isn’t supported. Add it in Affinity if you need it.');
             }
             if(source.children) {

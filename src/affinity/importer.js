@@ -8,6 +8,17 @@
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 function fail(message) { throw new Error(message); }
 function layerName(packet, id) { return packet?.layers?.find(l=>l.marker===id)?.name || 'A layer'; }
+// Figma renders only the first of GLASS/BACKGROUND_BLUR found on a layer; mirrors
+// the same scan the Figma plugin already applied (defense in depth, since this
+// runs in a different process from that decision).
+function visibleGlassEffect(effects) {
+    for (const e of effects || []) {
+        if (!e || e.visible === false) continue;
+        if (e.type === 'GLASS') return e;
+        if (e.type === 'BACKGROUND_BLUR') return null;
+    }
+    return null;
+}
 function warn(list, message) { if (!list.includes(message)) list.push(message); }
 function finite(n, label) { if (!Number.isFinite(n)) fail('Invalid ' + label); return n; }
 function number(s, label) {
@@ -1153,7 +1164,22 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
     const linearTextGradients=planLinearTextGradients(root,warnings,packet);
     const textTracking=planTextTracking(root),textFonts=planTextFonts(root);
     const artboards=packet?.artboards ? prepareArtboards(root,packet.artboards) : [];
-    return {svg: xml(root), effects, texts, artboards, linearTextGradients, angularGradients, backdrops, progressiveBlurs, textTracking, textFonts, strokeAlignments, ...images};
+    // Glass has no SVG representation (unlike background blur), so it's read straight
+    // off the transfer packet rather than recognized in the SVG tree.
+    const glass=(packet?.layers || []).map(layer=>{
+        const g=visibleGlassEffect(layer.effects);
+        if(!g)return null;
+        const frame=layer.width>0 && layer.height>0 && Array.isArray(layer.transform) && layer.transform.length===6 && layer.transform.every(Number.isFinite) ? {width:layer.width,height:layer.height,transform:layer.transform} : null;
+        return {marker:layer.marker,name:layer.name,frame,fillless:layer.glassFillless===true,
+            lightIntensity:Number.isFinite(g.lightIntensity) ? g.lightIntensity : 0.8,
+            lightAngle:Number.isFinite(g.lightAngle) ? g.lightAngle : -45,
+            refraction:Number.isFinite(g.refraction) ? g.refraction : 0.7,
+            depth:Number.isFinite(g.depth) ? g.depth : 20,
+            dispersion:Number.isFinite(g.dispersion) ? g.dispersion : 0,
+            radius:Number.isFinite(g.radius) ? g.radius : 0,
+            splay:Number.isFinite(g.splay) ? g.splay : 0};
+    }).filter(Boolean);
+    return {svg: xml(root), effects, texts, artboards, linearTextGradients, angularGradients, backdrops, progressiveBlurs, glass, textTracking, textFonts, strokeAlignments, ...images};
 }
 
 // Keep a stable outer group even for empty frames and frames containing one
@@ -1470,6 +1496,248 @@ function restoreBackdrops(doc,specs,warnings) {
     }
 }
 
+// Figma's glass effect has no SVG equivalent and Affinity has no live
+// refraction filter, so this bakes one: render whatever sits behind the glass
+// shape, run Quiver's glass shader over it on the CPU (frost, refraction,
+// dispersion and rim light), and drop the result in directly behind the glass
+// layer as a plain shape with the same silhouette and a bitmap fill.
+function restoreGlass(doc,specs,warnings) {
+    if(!specs.length)return;
+    const {RasterFormat,PixelBuffer,RasterExtendType,RasterResamplerType,NodeRenderingEngine,NodeRenderingEngineOptions}=require('/rasterobject.js');
+    const {createPixelReader}=require('/pixelaccessor.js');
+    const {AddChildNodesCommandBuilder,DocumentCommand,InsertionMode}=require('/commands.js');
+    const {ShapeNodeDefinition}=require('/nodes.js');
+    const {Transform}=require('/geometry.js');
+    const {FillDescriptor,BitmapFill,BlendMode}=require('/fills.js');
+    const {Selection}=require('/selections.js');
+    const {Colour}=require('/colours.js');
+    const index=indexLayersByName(doc.layers.all.toArray());
+
+    // Correct (not approximate) sliding-window box blur; three passes of it
+    // approximate a Gaussian closely enough for frost.
+    function boxBlur(buf,w,h,radius) {
+        const r=Math.max(0,Math.round(radius));
+        if(!r)return buf;
+        let src=buf,dst=new Float32Array(buf.length);
+        const clamp=(v,n)=>Math.max(0,Math.min(n-1,v));
+        function pass(horizontal) {
+            const size=horizontal?w:h,lines=horizontal?h:w,count=2*r+1;
+            const at=(line,i)=>((horizontal?line*w+clamp(i,size):clamp(i,size)*w+line))*4;
+            for(let line=0;line<lines;line++) {
+                let sr=0,sg=0,sb=0,sa=0;
+                for(let i=-r;i<=r;i++){const idx=at(line,i);sr+=src[idx];sg+=src[idx+1];sb+=src[idx+2];sa+=src[idx+3];}
+                for(let i=0;i<size;i++) {
+                    const idx=at(line,i);
+                    dst[idx]=sr/count;dst[idx+1]=sg/count;dst[idx+2]=sb/count;dst[idx+3]=sa/count;
+                    const add=at(line,i+r+1),rem=at(line,i-r);
+                    sr+=src[add]-src[rem];sg+=src[add+1]-src[rem+1];sb+=src[add+2]-src[rem+2];sa+=src[add+3]-src[rem+3];
+                }
+            }
+            [src,dst]=[dst,src];
+        }
+        for(let pass_=0;pass_<3;pass_++){pass(true);pass(false);}
+        return src;
+    }
+
+    // Chamfer distance transform (two-pass, orthogonal weight 1 / diagonal
+    // weight √2): a close, fast approximation of Euclidean distance from each
+    // foreground (mask!==0) pixel to the nearest background pixel.
+    // Three box passes ≈ a Gaussian of this sigma; outside the buffer counts as 0,
+    // so a silhouette touching the buffer's edge still fades out there.
+    function blurAlpha(src,w,h,sigma) {
+        const r=Math.max(1,Math.round((Math.sqrt(1+4*sigma*sigma)-1)/2)),n=2*r+1;
+        let a=Float32Array.from(src),b=new Float32Array(w*h);
+        for(let p=0;p<6;p++) {
+            const horizontal=p%2===0,size=horizontal?w:h,lines=horizontal?h:w,step=horizontal?1:w;
+            for(let l=0;l<lines;l++) {
+                const base=horizontal?l*w:l;let sum=0;
+                for(let i=0;i<=r && i<size;i++)sum+=a[base+i*step];
+                for(let i=0;i<size;i++) {
+                    b[base+i*step]=sum/n;
+                    if(i+r+1<size)sum+=a[base+(i+r+1)*step];
+                    if(i-r>=0)sum-=a[base+(i-r)*step];
+                }
+            }
+            [a,b]=[b,a];
+        }
+        return a;
+    }
+
+    // Outside the buffer counts as background, so a shape touching the buffer's
+    // edge still has an edge there.
+    function edgeDistance(mask,w,h) {
+        const D=new Float32Array(w*h),D1=1,D2=Math.SQRT2;
+        const get=(x,y)=>x<0||y<0||x>=w||y>=h ? 0 : D[y*w+x];
+        for(let i=0;i<w*h;i++)D[i]=mask[i]?1e9:0;
+        for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
+            const i=y*w+x;if(!mask[i])continue;
+            D[i]=Math.min(D[i],get(x-1,y)+D1,get(x,y-1)+D1,get(x-1,y-1)+D2,get(x+1,y-1)+D2);
+        }
+        for(let y=h-1;y>=0;y--)for(let x=w-1;x>=0;x--) {
+            const i=y*w+x;if(!mask[i])continue;
+            D[i]=Math.min(D[i],get(x+1,y)+D1,get(x,y+1)+D1,get(x+1,y+1)+D2,get(x-1,y+1)+D2);
+        }
+        return D;
+    }
+
+    for(const spec of specs) {
+        let backdropNode=null,filled=false;
+        try {
+            const matches=index.get(spec.marker) || [];
+            if(matches.length!==1)fail('layer not found');
+            const node=matches[0];
+            // A Figma frame arrives as a group around its background shape; the
+            // backdrop needs that shape's silhouette (a circle must stay a circle).
+            // It can sit deeper, e.g. inside a clip group when the frame has other effects.
+            let silhouette=node.shapeInterface ? node : null;
+            if(!silhouette){
+                const vb=node.getExactSpreadVisibleBox(),queue=node.children.toArray();
+                const same=b=>Math.abs(b.x-vb.x)<.5 && Math.abs(b.y-vb.y)<.5 && Math.abs(b.width-vb.width)<.5 && Math.abs(b.height-vb.height)<.5;
+                while(queue.length && !silhouette){const c=queue.shift();if(c.shapeInterface){if(same(c.getExactSpreadVisibleBox()))silhouette=c;}else if(c.children)queue.push(...c.children.toArray());}
+            }
+            // Spread space: a flipped or nested shape's baseBox is in its own local space.
+            // ponytail: assumes the glass layer's parents aren't transformed; place via baseToSpreadTransform if that turns up.
+            const region=(silhouette || node).getExactSpreadVisibleBox(),box=region;
+            const x0=Math.floor(region.x),y0=Math.floor(region.y);
+            const w=Math.max(1,Math.ceil(region.x+region.width)-x0),h=Math.max(1,Math.ceil(region.y+region.height)-y0);
+            if(w*h>4_000_000)fail('the glass panel is too large to rebuild'); // ponytail: caps pixel-loop cost, add downscale-then-upscale if huge panels matter
+
+            // What's behind the glass: render the whole spread with this layer and
+            // everything painted above it hidden. A node's own render is padded by its
+            // effects' bleed at an origin the SDK doesn't expose; the spread render
+            // always starts at the spread origin, 1px per unit (the import is 72 DPI).
+            // ponytail: re-renders the whole spread per glass layer; crop the render if big multi-artboard spreads get slow.
+            const above=[node];
+            for(let n=node;n && n.parent;n=n.parent)for(let s=n.nextSibling;s;s=s.nextSibling)if(s.visibilityInterface?.isVisible)above.push(s);
+            const hidden=Selection.create(doc,above);
+            let spreadBmp;
+            doc.setVisible(false,hidden);
+            try {
+                const options=NodeRenderingEngineOptions.create();options.clipToSpread=true;
+                spreadBmp=NodeRenderingEngine.create(doc.currentSpread,RasterFormat.RGBA8,options).createCompatibleBitmap(true);
+            } finally { doc.setVisible(true,hidden); }
+            const backdrop=new Float32Array(w*h*4),spreadReader=createPixelReader(spreadBmp);
+            for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
+                const sx=x+x0,sy=y+y0;if(sx<0||sy<0||sx>=spreadBmp.width||sy>=spreadBmp.height)continue;
+                const p=spreadReader.readPixel(sx,sy),idx=(y*w+x)*4;
+                backdrop[idx]=p.r;backdrop[idx+1]=p.g;backdrop[idx+2]=p.b;backdrop[idx+3]=p.alpha;
+            }
+            spreadReader.dispose();
+            const frostSigma=Math.max(0,Math.min(100,spec.radius))*0.5; // Quiver: frost σ = Frost ÷ 2
+            const frosted=boxBlur(backdrop,w,h,Math.round((Math.sqrt(1+4*frostSigma*frostSigma)-1)/2));
+            const shape=silhouette && silhouette.shapeInterface.shape;
+
+            // The backdrop shape itself: same silhouette, no effects. Created now so it
+            // can be rendered for the mask; a node without effects renders unpadded.
+            const shapeDef=ShapeNodeDefinition.createDefault();
+            shapeDef.shape=shape ? shape.clone() : (()=>{const {ShapeRectangle}=require('/shapes.js');return ShapeRectangle.create();})();
+            shapeDef.setBoundingRectangle(box);
+            const builder=AddChildNodesCommandBuilder.create();builder.setInsertionTarget(node);builder.setInsertionMode(InsertionMode.Behind);
+            builder.addNode(shapeDef);
+            const command=builder.createCommand(false);doc.executeCommand(command);
+            backdropNode=command.newNodes[0];if(!backdropNode)fail('Affinity did not create the glass backdrop');
+            const sel=Selection.create(doc,backdropNode);
+            doc.executeCommand(DocumentCommand.createSetBrushFill(sel,FillDescriptor.createSolid(Colour.createRGBA8({r:255,g:255,b:255,alpha:255}),BlendMode.Normal)));
+
+            let mask=null;
+            try {
+                const maskBmp=NodeRenderingEngine.createDefault(backdropNode,RasterFormat.RGBA8).createCompatibleBitmap(true);
+                const mb=backdropNode.getExactSpreadVisibleBox(),mx=Math.floor(mb.x)-x0,my=Math.floor(mb.y)-y0;
+                const reader=createPixelReader(maskBmp);
+                mask=new Uint8Array(w*h);
+                for(let y=0;y<maskBmp.height;y++)for(let x=0;x<maskBmp.width;x++) {
+                    const tx=x+mx,ty=y+my;if(tx<0||ty<0||tx>=w||ty>=h)continue;
+                    mask[ty*w+tx]=reader.readPixel(x,y).alpha>127?1:0;
+                }
+                reader.dispose();
+                if(!mask.some(Boolean))mask=null;
+            } catch(e) { mask=null; }
+
+            let final=frosted;
+            if(mask) {
+                // A CPU port of Quiver's glass shader (quiver: dev/src/plugins/Glass/glassPass.sksl),
+                // calibrated against Figma's glass; keep its constants in sync rather than
+                // tuning them here. One addition, matched to Figma renders: the refracting
+                // rim's width is capped at about a third of the shape's smaller side (its pull
+                // isn't), so small shapes get a narrow ring instead of being distorted all over.
+                const pct=v=>Math.max(0,Math.min(1,v>1 ? v/100 : v));
+                const refr=pct(spec.refraction),disp01=pct(spec.dispersion),lint=pct(spec.lightIntensity);
+                const depth=Math.max(1,Math.min(100,spec.depth)),t=Math.max(1,Math.min(depth,0.32*Math.min(w,h)));
+                const sigma=Math.max(4,Math.min(250,0.35*t)),reach=2.28*sigma;
+                const D=edgeDistance(mask,w,h),cover=Float32Array.from(mask),wide=blurAlpha(cover,w,h,sigma);
+                let inradius=0;for(const d of D)if(d>inradius)inradius=d;
+                const smooth=(a,b,v)=>{const k=Math.max(0,Math.min(1,(v-a)/(b-a)));return k*k*(3-2*k);};
+                const alphaAt=(a,fx,fy)=>{
+                    const ix=Math.floor(fx),iy=Math.floor(fy),tx=fx-ix,ty=fy-iy,g=(x,y)=>x<0||y<0||x>=w||y>=h ? 0 : a[y*w+x];
+                    return (g(ix,iy)*(1-tx)+g(ix+1,iy)*tx)*(1-ty)+(g(ix,iy+1)*(1-tx)+g(ix+1,iy+1)*tx)*ty;
+                };
+                const colourAt=(fx,fy,c)=>{
+                    const ix=Math.floor(fx),iy=Math.floor(fy),tx=fx-ix,ty=fy-iy;
+                    const g=(x,y)=>frosted[(Math.max(0,Math.min(h-1,y))*w+Math.max(0,Math.min(w-1,x)))*4+c];
+                    return (g(ix,iy)*(1-tx)+g(ix+1,iy)*tx)*(1-ty)+(g(ix,iy+1)*(1-tx)+g(ix+1,iy+1)*tx)*ty;
+                };
+                const delta=Math.max(1.5*sigma,2),dk=disp01*0.05;
+                const la=(-(spec.lightAngle||0)-90)*Math.PI/180,Lx=-Math.cos(la),Ly=-Math.sin(la);
+                const liN=Math.pow(lint,0.85),li=0.378*liN,li2=li*0.97;
+                final=new Float32Array(w*h*4);
+                for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
+                    const i=y*w+x,idx=i*4;
+                    final[idx]=frosted[idx];final[idx+1]=frosted[idx+1];final[idx+2]=frosted[idx+2];final[idx+3]=frosted[idx+3];
+                    if(!mask[i])continue;
+                    // Outward normal from the widely blurred silhouette: smooth around corners.
+                    const gx=(alphaAt(wide,x+delta,y)-alphaAt(wide,x-delta,y))/(2*delta);
+                    const gy=(alphaAt(wide,x,y+delta)-alphaAt(wide,x,y-delta))/(2*delta);
+                    const gm=Math.hypot(gx,gy),nx=gm>1e-5 ? -gx/gm : 0,ny=gm>1e-5 ? -gy/gm : -1;
+                    const gate=smooth(0.1,0.35,gm*sigma*2.5);
+                    const u=Math.max(0,1-Math.min(D[i],reach)/reach);
+                    // Never pull past the middle, which would mirror the far side.
+                    const dispMag=Math.min(1.08*depth*Math.pow(u,2.4),Math.max(0,inradius-D[i]));
+                    const dx=-nx*refr*dispMag*gate,dy=-ny*refr*dispMag*gate;
+                    const smear=Math.min(0.05*dispMag,8)*gate,sNx=nx*smear,sNy=ny*smear,sTx=-ny*smear,sTy=nx*smear;
+                    const wC=smooth(0.003,0.012,alphaAt(cover,x+dx,y+dy));
+                    const rgb=[0,1,2].map(c=>{
+                        const k=c===0 ? 1+dk : c===2 ? 1-dk : 1,ox=x+dx*k,oy=y+dy*k;
+                        const v=(2*colourAt(ox,oy,c)+colourAt(ox+sNx,oy+sNy,c)+colourAt(ox-sNx,oy-sNy,c)+colourAt(ox+sTx,oy+sTy,c)+colourAt(ox-sTx,oy-sTy,c))/6;
+                        return (frosted[idx+c]+(v-frosted[idx+c])*wC)/255;
+                    });
+                    // Light: a thin rim on the lit side and a slightly fainter one opposite,
+                    // plus faint shading/glow across the refracting band.
+                    const thin=0.66*(1-smooth(0.006,0.5,alphaAt(cover,x+nx*1.2,y+ny*1.2)));
+                    const cF=nx*Lx+ny*Ly,px=x-nx*8,py=y-ny*8;
+                    const rimAmt=thin*(0.73+0.27*0.5*(alphaAt(cover,px-ny*60,py+nx*60)+alphaAt(cover,px+ny*60,py-nx*60)));
+                    const rim=2*smooth(0.30,0.93,cF)*rimAmt*li*gate+2*smooth(0.44,1.03,-cF)*rimAmt*li2*gate;
+                    const shadeB=0.081*smooth(0.30,0.93,cF)*u*liN*gate,glowB=0.070*smooth(0.30,0.93,-cF)*u*u*liN*gate;
+                    for(let c=0;c<3;c++) {
+                        let v=Math.min(1,rgb[c]+rim);
+                        v=Math.max(0,v*(1-0.5*shadeB)-0.35*shadeB);
+                        final[idx+c]=Math.min(1,v+glowB*(0.33+0.68*(1-v)))*255;
+                    }
+                }
+            }
+
+            const pxBuffer=PixelBuffer.create(w,h,RasterFormat.RGBA8);
+            const raw=new Uint8Array(pxBuffer.buffer);
+            for(let i=0;i<w*h*4;i++)raw[i]=final[i];
+            const finalBitmap=pxBuffer.createCompatibleBitmap(true);
+
+            // A bitmap fill spans −1…1 around its origin, in the node's base space.
+            const fill=BitmapFill.create(finalBitmap,RasterExtendType.Repeat,RasterResamplerType.Bilinear,false);
+            const world=new Transform();
+            [w/2,0,x0+w/2,0,h/2,y0+h/2].forEach((v,i)=>{world.data[i]=v;});
+            doc.executeCommand(DocumentCommand.createSetBrushFill(sel,FillDescriptor.create(fill,true,backdropNode.baseToSpreadTransform.inverted.multiply(world))));
+            backdropNode.userDescription=spec.name+' glass backdrop';filled=true;
+            // The Figma plugin gave fill-less glass shapes a 1% stand-in fill to get them exported.
+            if(spec.fillless)try{doc.executeCommand(DocumentCommand.createSetBrushFill(Selection.create(doc,silhouette || node),FillDescriptor.createNone()));}catch(e){warn(warnings,spec.name+': remove the faint white fill on this glass layer in Affinity.');}
+
+            if(!mask)warn(warnings,spec.name+': glass refraction couldn’t be reproduced for this shape. Only frost was added.');
+            if(spec.dispersion>0)warn(warnings,spec.name+': glass dispersion is an approximation. Fine-tune the edge colour in Affinity if needed.');
+        } catch(e) {
+            if(backdropNode && !filled)try{backdropNode.delete();}catch(ignore){} // the white mask stand-in must not survive
+            warn(warnings,spec.name+': glass couldn’t be rebuilt. Add a Gaussian Blur live filter in Affinity if you need it.');
+        }
+    }
+}
+
 function affinityBlurRadius(effect) {
     return Number.isFinite(effect.figmaRadius) ? effect.figmaRadius/2 : effect.sigma;
 }
@@ -1583,6 +1851,7 @@ function importPrepared(result, folder) {
     restoreAngularGradients(doc,result.angularGradients || [],warnings);
     restoreBackdrops(doc,result.backdrops || [],warnings);
     restoreProgressiveBlurs(doc,result.progressiveBlurs || [],warnings);
+    restoreGlass(doc,result.glass || [],warnings);
     const imageTiles=restoreImageTiles(doc,result.imageTiles || [],assets,assetFolder,result.packet,warnings);
     timings.textMs=Date.now()-stage;stage=Date.now();
     const nodes = indexLayersByName(doc.layers.all.toArray());
