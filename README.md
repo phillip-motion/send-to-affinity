@@ -2,7 +2,7 @@
 
 Send a Figma selection to [Affinity](https://www.affinity.studio) as an editable document: live text, vectors, original-resolution images and native blur/shadow effects. Select several frames and they become artboards.
 
-Everything runs locally. The Figma plugin talks to Affinity's built-in MCP server on `localhost:6767`, and the conversion runs inside Affinity. There's nothing to install in Affinity, and no account or cloud upload.
+Everything runs locally. The Figma plugin talks to Affinity's built-in MCP server on `localhost:6767`, and the conversion runs inside Affinity. There's nothing to install in Affinity, and no account or cloud upload. It's free/
 
 ## Install
 
