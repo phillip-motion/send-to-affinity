@@ -86,6 +86,29 @@ test('negative inner spread retains a square dilation and a separate unchanged c
     assert.equal(innerSpreadGeometry({...shape,attrs:{...shape.attrs,transform:'scale(2)'}},-5,0,8,6),null);
     assert.equal(innerSpreadGeometry({tag:'path',attrs:{d:'M0 0L40 0L20 30Z'},children:[]},-5,0,8,6),null);
 });
+test('inner shadow on a faint fill becomes a clipped blur, since Affinity scales it by the fill alpha',()=>{
+    const filter='<filter id="inner"><feFlood flood-opacity="0" result="bg"/><feBlend in="SourceGraphic" in2="bg" result="shape"/><feColorMatrix in="SourceAlpha" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hard"/><feOffset dx="-4" dy="2"/><feGaussianBlur stdDeviation="6"/><feComposite in2="hard" operator="arithmetic" k2="-1" k3="1"/><feColorMatrix values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .5 0"/><feBlend in2="shape"/></filter>';
+    const star='<path d="M50 0C55 40 60 45 100 50C60 55 55 60 50 100C45 60 40 55 0 50C40 45 45 40 50 0Z" fill="white" fill-opacity="0.01"/>';
+    const r=compile('<svg><defs>'+filter+'</defs><g filter="url(#inner)">'+star+'</g></svg>');
+    assert.deepEqual(r.effects.flatMap(e=>e.native).map(e=>e.countAs || e.kind),['innerShadow']);
+    const helper=all(parseXml(r.svg)).find(n=>n.attrs.id===r.effects[0].marker);
+    assert.equal(helper.attrs.transform,'translate(-4 2)');assert.match(helper.attrs.d,/ZM50 0C55 40/);
+    // An opaque fill keeps Affinity's native inner shadow.
+    const opaque=compile('<svg><defs>'+filter+'</defs><g filter="url(#inner)">'+star.replace(' fill-opacity="0.01"','')+'</g></svg>');
+    assert.deepEqual(opaque.effects.flatMap(e=>e.native).map(e=>e.kind),['innerShadow']);
+});
+test('plus-lighter and plus-darker are restored as Add and Linear Burn',()=>{
+    const r=compile('<svg><g id="Glow" opacity="0.25" style="mix-blend-mode:plus-lighter"><circle r="5"/></g><g style="mix-blend-mode:plus-darker"><rect width="5" height="5"/></g><g style="mix-blend-mode:overlay"><rect width="5" height="5"/></g></svg>');
+    assert.deepEqual(r.blendModes.map(b=>b.mode),['Add','LinearBurn']);
+    assert.equal(r.blendModes[0].marker,'Glow');
+    assert.ok(all(parseXml(r.svg)).some(n=>n.attrs.id===r.blendModes[1].marker));
+    // Affinity clamps before applying opacity, so plain colours take the opacity instead.
+    const folded=compile('<svg><g opacity="0.25" style="mix-blend-mode:plus-lighter"><circle r="5" fill="#FF9E01"/></g><g opacity="0.5" style="mix-blend-mode:plus-darker"><rect width="5" height="5" fill="#000" fill-opacity="0.5"/></g><g opacity="0.5" style="mix-blend-mode:plus-lighter"><rect width="5" height="5" fill="url(#g)"/></g></svg>');
+    const nodes=all(parseXml(folded.svg));
+    assert.equal(nodes.find(n=>n.tag==='circle').attrs.fill,'rgb(64,40,0)');
+    assert.equal(nodes.filter(n=>n.tag==='rect')[0].attrs.fill,'rgb(191,191,191)');
+    assert.equal(nodes.filter(n=>n.tag==='g')[2].attrs.opacity,'0.5'); // gradients keep their opacity
+});
 test('button negative spread becomes a clipped editable blur, with no duplicate native inner shadow',()=>{
     const filter='<filter id="inner"><feColorMatrix in="SourceAlpha" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hard"/><feMorphology in="SourceAlpha" operator="dilate" radius="5"/><feOffset dy="8"/><feGaussianBlur stdDeviation="6"/><feComposite in2="hard" operator="arithmetic" k2="-1" k3="1"/><feColorMatrix values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .16 0"/><feBlend in2="SourceGraphic"/></filter>';
     const source='<svg><defs>'+filter+'</defs><g id="Button" filter="url(#inner)">'+roundedButton+'<text x="25" y="35">Share</text></g></svg>';

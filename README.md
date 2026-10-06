@@ -1,6 +1,12 @@
 # Send to Affinity
 
+<<<<<<< HEAD
 Send a Figma selection to [Affinity](https://www.affinity.studio) as an editable document: live text, vectors, original-resolution images and native blur/shadow effects.
+=======
+Send a Figma selection to [Affinity](https://www.affinity.studio) as an editable document: live text, vectors, original-resolution images and native blur/shadow effects. Select several frames and they become artboards.
+
+Everything runs locally. The Figma plugin talks to Affinity's built-in MCP server on `localhost:6767`, and the conversion runs inside Affinity. There's nothing to install in Affinity, and no account or cloud upload. It's free.
+>>>>>>> 0cd0bfe (rearchitect repo)
 
 ## Install
 
@@ -32,7 +38,12 @@ Each send creates a new document in Affinity. It doesn't overwrite anything, and
 | Progressive blur | A tilt-shift Depth of Field live filter inside the layer |
 | Masks | Pixel masks, with Figma's alpha masks and blurred mask edges kept |
 | Inside and outside strokes | Native inside and outside stroke alignment |
+<<<<<<< HEAD
 | Glass | Dispersion is only partly reproduced |
+=======
+
+Not converted (reported as warnings): diamond gradients, auto layout, other filters, and text with image fills or strokes. Install the same fonts in both apps. Text wrapping can differ slightly between them.
+>>>>>>> 0cd0bfe (rearchitect repo)
 
 ## Develop
 

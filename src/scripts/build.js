@@ -1,5 +1,5 @@
 'use strict';
-// Builds ../figma-plugin/, the ready-to-import Figma plugin at the repo root:
+// Builds manifest.json, code.js and ui.html at the repo root, the ready-to-import Figma plugin:
 // the importer is embedded in the panel and __VERSION__ comes from package.json.
 const fs=require('node:fs'),path=require('node:path');
 const root=path.join(__dirname,'..'),read=file=>fs.readFileSync(path.join(root,file),'utf8');
@@ -21,9 +21,9 @@ function files(version=JSON.parse(read('package.json')).version) {
 }
 
 if(require.main===module) {
-    const out=path.join(root,'..','figma-plugin');
+    const out=path.join(root,'..');
     fs.mkdirSync(out,{recursive:true});
     for(const [name,content] of Object.entries(files()))fs.writeFileSync(path.join(out,name),content);
-    console.log('Built figma-plugin/. In Figma, import figma-plugin/manifest.json.');
+    console.log('Built the plugin at the repo root. In Figma, import manifest.json.');
 }
 module.exports={files,importer};

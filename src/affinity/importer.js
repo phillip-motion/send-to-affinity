@@ -317,40 +317,50 @@ function nativeFilterPlan(filter) {
 function innerSpreadGeometry(node, spread, dx, dy, sigma) {
     if (node.attrs.transform || node.attrs.stroke || node.attrs.mask || node.attrs['clip-path']) return null;
     const a=node.attrs, grow=-spread;
-    let hole, bounds;
+    let hole, bounds, offset;
+    // Any other absolute path works too when there's no spread: the hole is the path
+    // itself, moved by the shadow offset. Spread would need real erosion.
+    const anyPath=()=>{
+        if(grow || !/^\s*M/.test(a.d || ''))return false;
+        try{const [x,y,w,h]=pathBox(a.d);bounds=[x,y,x+w,y+h];}catch(e){return false;}
+        hole=a.d;offset=true;return true;
+    };
     if (node.tag==='rect' && !a.rx && !a.ry) {
         const x=Number(a.x || 0),y=Number(a.y || 0),w=Number(a.width),h=Number(a.height);
         if (![x,y,w,h].every(Number.isFinite) || w<=0 || h<=0) return null;
         bounds=[x,y,x+w,y+h];
         hole=`M${x-grow+dx} ${y-grow+dy}H${x+w+grow+dx}V${y+h+grow+dy}H${x-grow+dx}Z`;
     } else if (node.tag==='path') {
-        const tokens=(a.d || '').match(/[a-z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:e[-+]?\d+)?/ig) || [];
-        const commands=[],arity={M:2,C:6,H:1,V:1,Z:0};
-        for(let i=0;i<tokens.length;){
-            const op=tokens[i++],count=arity[op];
-            if(count==null || i+count>tokens.length)return null;
-            const values=tokens.slice(i,i+count).map(Number);i+=count;
-            if(!values.every(Number.isFinite))return null;
-            commands.push({op,values});
-        }
-        if(commands.map(c=>c.op).join('')!=='MCHCVCHCVZ')return null;
-        const v=commands.map(c=>c.values),left=v[0][0],top=v[1][5],right=v[3][4],bottom=v[5][5];
-        const close=(x,y)=>Math.abs(x-y)<.06;
-        // Only Figma's axis-aligned convex rounded-rectangle silhouette.
-        if(!(right>left && bottom>top) || !close(v[1][0],left) || !close(v[1][3],top) ||
-            !close(v[3][1],top) || !close(v[3][2],right) || !close(v[5][0],right) ||
-            !close(v[5][3],bottom) || !close(v[7][1],bottom) || !close(v[7][2],left) ||
-            !close(v[7][4],left) || !close(v[3][5],v[0][1]) || !close(v[8][0],v[0][1]) ||
-            !close(v[1][4],v[6][0]) || !close(v[2][0],v[5][4]) || !close(v[4][0],v[7][5]))return null;
-        for(const [index,sx,sy] of [[0,-1,-1],[1,-1,-1],[3,1,-1],[5,1,1],[7,-1,1]])
-            commands[index].values=commands[index].values.map((n,i)=>n+(i%2?dy+sy*grow:dx+sx*grow));
-        commands[2].values[0]+=dx+grow;commands[4].values[0]+=dy+grow;
-        commands[6].values[0]+=dx-grow;commands[8].values[0]+=dy-grow;
-        hole=commands.map(c=>c.op+c.values.join(' ')).join('');bounds=[left,top,right,bottom];
+        const rounded=()=>{
+            const tokens=(a.d || '').match(/[a-z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:e[-+]?\d+)?/ig) || [];
+            const commands=[],arity={M:2,C:6,H:1,V:1,Z:0};
+            for(let i=0;i<tokens.length;){
+                const op=tokens[i++],count=arity[op];
+                if(count==null || i+count>tokens.length)return false;
+                const values=tokens.slice(i,i+count).map(Number);i+=count;
+                if(!values.every(Number.isFinite))return false;
+                commands.push({op,values});
+            }
+            if(commands.map(c=>c.op).join('')!=='MCHCVCHCVZ')return false;
+            const v=commands.map(c=>c.values),left=v[0][0],top=v[1][5],right=v[3][4],bottom=v[5][5];
+            const close=(x,y)=>Math.abs(x-y)<.06;
+            // Only Figma's axis-aligned convex rounded-rectangle silhouette.
+            if(!(right>left && bottom>top) || !close(v[1][0],left) || !close(v[1][3],top) ||
+                !close(v[3][1],top) || !close(v[3][2],right) || !close(v[5][0],right) ||
+                !close(v[5][3],bottom) || !close(v[7][1],bottom) || !close(v[7][2],left) ||
+                !close(v[7][4],left) || !close(v[3][5],v[0][1]) || !close(v[8][0],v[0][1]) ||
+                !close(v[1][4],v[6][0]) || !close(v[2][0],v[5][4]) || !close(v[4][0],v[7][5]))return false;
+            for(const [index,sx,sy] of [[0,-1,-1],[1,-1,-1],[3,1,-1],[5,1,1],[7,-1,1]])
+                commands[index].values=commands[index].values.map((n,i)=>n+(i%2?dy+sy*grow:dx+sx*grow));
+            commands[2].values[0]+=dx+grow;commands[4].values[0]+=dy+grow;
+            commands[6].values[0]+=dx-grow;commands[8].values[0]+=dy-grow;
+            hole=commands.map(c=>c.op+c.values.join(' ')).join('');bounds=[left,top,right,bottom];return true;
+        };
+        if(!rounded() && !anyPath())return null;
     } else return null;
     const margin=grow+3*sigma+Math.abs(dx)+Math.abs(dy)+4;
     const [l,t,r,b]=bounds.map((n,i)=>n+(i<2?-margin:margin));
-    return {d:`M${l} ${t}H${r}V${b}H${l}Z`+hole,
+    return {d:`M${l} ${t}H${r}V${b}H${l}Z`+hole,...(offset && (dx || dy) ? {transform:'translate('+dx+' '+dy+')'} : {}),
         clip:{tag:node.tag,attrs:Object.fromEntries(Object.entries(a).filter(([k])=>['d','x','y','width','height','rx','ry','fill-rule'].includes(k))),children:[]}};
 }
 
@@ -950,12 +960,68 @@ function restoreStrokeAlignment(doc,plans,packet,warnings) {
     }
 }
 
+// Figma's Plus lighter/darker export as CSS plus-lighter/plus-darker, which Affinity's
+// SVG loader draws as Normal. Set them to Add and Linear Burn after import.
+function planBlendModes(root) {
+    const ids=new Set(),plans=[];let serial=0;
+    walk(root,n=>{if(n.attrs.id)ids.add(n.attrs.id);});
+    walk(root,n=>{
+        const m=/mix-blend-mode\s*:\s*plus-(lighter|darker)/i.exec(n.attrs.style || '');
+        if(!m)return;
+        if(!n.attrs.id){let id;do{id='FigmaPasteBlend'+(++serial);}while(ids.has(id));ids.add(id);n.attrs.id=id;}
+        const lighter=m[1].toLowerCase()==='lighter';
+        foldBlendOpacity(n,lighter);
+        plans.push({marker:n.attrs.id,mode:lighter ? 'Add' : 'LinearBurn'});
+    });
+    return plans;
+}
+// Affinity also clamps dst+src before applying opacity, where Figma scales the source
+// first, so a 25% Plus lighter glow comes out dimmer. When every shape inside has a plain
+// colour, fold the opacity into the colours instead (black adds nothing to Add, white
+// burns nothing in Linear Burn) and draw the layer at 100%. Exact until a channel clips.
+function foldBlendOpacity(n,lighter) {
+    const drawn=['path','rect','circle','ellipse','polygon','polyline','line'],paints=[];
+    let ok=true;
+    walk(n,c=>{
+        if(['text','image','use','foreignObject'].includes(c.tag))ok=false;
+        if(c!==n && !drawn.includes(c.tag) && (c.attrs.opacity!=null || c.attrs.fill!=null || c.attrs.stroke!=null))ok=false; // ponytail: only the layer's own opacity folds
+        if(!drawn.includes(c.tag))return;
+        for(const [key,opacity] of [['fill','fill-opacity'],['stroke','stroke-opacity']]){
+            const value=c.attrs[key] ?? (key==='fill' ? null : 'none');
+            if(value==='none')continue;
+            let parsed;try{parsed=value && colour(value);}catch(e){}
+            const rgb=parsed && (/^#/.test(parsed.colour) ? [1,3,5].map(i=>parseInt(parsed.colour.slice(i,i+2),16)) : /^rgb\(/.test(parsed.colour) ? parsed.colour.slice(4,-1).split(',').map(Number) : null);
+            if(!rgb){ok=false;continue;}
+            paints.push({c,key,opacity,rgb,alpha:parsed.opacity*Number(c.attrs[opacity] ?? 1)*Number(c.attrs.opacity ?? 1)});
+        }
+    });
+    const alpha=Number(n.attrs.opacity ?? 1);
+    if(!ok || !paints.length || !(alpha>=0 && alpha<=1))return;
+    for(const p of paints){
+        const a=alpha*p.alpha;
+        p.c.attrs[p.key]='rgb('+p.rgb.map(v=>Math.round(lighter ? v*a : 255-(255-v)*a)).join(',')+')';
+        delete p.c.attrs[p.opacity];delete p.c.attrs.opacity;
+    }
+    delete n.attrs.opacity;
+}
+function restoreBlendModes(doc,plans,packet,warnings) {
+    if(!plans.length)return;
+    const {BlendMode}=require('/fills.js'),{DocumentCommand}=require('/commands.js'),{Selection}=require('/selections.js');
+    const index=indexLayersByName(doc.layers.all.toArray());
+    for(const plan of plans) {
+        const matches=index.get(plan.marker) || [];
+        try{if(matches.length!==1)fail('not found');doc.executeCommand(DocumentCommand.createSetBlendMode(Selection.create(doc,matches[0]),BlendMode[plan.mode]));}
+        catch(e){warn(warnings,layerName(packet,plan.marker)+': set this layer’s blend mode to '+(plan.mode==='Add' ? 'Add' : 'Linear Burn')+' in Affinity.');}
+    }
+}
+
 function prepareSvg(svg, warnings, repairBlur, packet) {
     const root = parseXml(svg), filters = new Map(), effects = [];
     const {angular:angularGradients,backdrops}=omitFigmaBackdropHelpers(root,warnings,packet);
     promoteInlineStyles(root);
     alphaMasksAsLuminance(root,warnings,packet);
     const strokeAlignments=planStrokeAlignment(root);
+    const blendModes=planBlendModes(root);
     let texts=[];
     const textTargets=new Map();
     if (packet) {
@@ -1099,15 +1165,19 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
         for(const child of visible.slice(1))walk(child,c=>{
             if(!['g','text','tspan'].includes(c.tag) || c.attrs.transform || c.attrs.filter)button=false;
         });
-        if(button)plan=plan.filter(effect=>{
-            if(effect.kind!=='innerShadow' || !(effect.spread<0))return true;
-            const geometry=innerSpreadGeometry(silhouette,effect.spread,effect.dx,effect.dy,effect.sigma);
+        // Figma casts inner shadows from the shape's hard alpha; Affinity from its real alpha,
+        // so a faint fill (often a 1% stand-in for an effects-only layer) hides them. The SDK
+        // can't set Affinity's layer Fill Opacity, so draw those shadows as geometry too.
+        const faint=visible.length===1 && Number(silhouette.attrs['fill-opacity'] ?? 1)<1;
+        if(button || faint)plan=plan.filter(effect=>{
+            if(effect.kind!=='innerShadow' || !(faint || effect.spread<0))return true;
+            const geometry=innerSpreadGeometry(silhouette,effect.spread || 0,effect.dx,effect.dy,effect.sigma);
             if(!geometry)return true;
             let helper;do{helper='FigmaPasteInnerSpread'+(++serial);}while(svg.includes(helper));
             const clip=helper+'Clip',rgb=effect.rgb.map(c=>Math.round(c*255));
             n.children.push({tag:'defs',attrs:{},children:[{tag:'clipPath',attrs:{id:clip,clipPathUnits:'userSpaceOnUse'},children:[geometry.clip]}]},
-                {tag:'g',attrs:{'clip-path':'url(#'+clip+')'},children:[{tag:'path',attrs:{id:helper,d:geometry.d,'fill-rule':'evenodd',fill:'rgb('+rgb.join(',')+')','fill-opacity':String(effect.opacity)},children:[]}]});
-            effects.push({marker:helper,name:'Inner shadow (spread '+effect.spread+' px)',native:[{kind:'blur',sigma:effect.sigma,countAs:'innerShadow'}]});
+                {tag:'g',attrs:{'clip-path':'url(#'+clip+')'},children:[{tag:'path',attrs:{id:helper,d:geometry.d,...(geometry.transform ? {transform:geometry.transform} : {}),'fill-rule':'evenodd',fill:'rgb('+rgb.join(',')+')','fill-opacity':String(effect.opacity)},children:[]}]});
+            effects.push({marker:helper,name:effect.spread ? 'Inner shadow (spread '+effect.spread+' px)' : 'Inner shadow',native:[{kind:'blur',sigma:effect.sigma,countAs:'innerShadow'}]});
             target=n;
             return false;
         });
@@ -1179,7 +1249,7 @@ function prepareSvg(svg, warnings, repairBlur, packet) {
             radius:Number.isFinite(g.radius) ? g.radius : 0,
             splay:Number.isFinite(g.splay) ? g.splay : 0};
     }).filter(Boolean);
-    return {svg: xml(root), effects, texts, artboards, linearTextGradients, angularGradients, backdrops, progressiveBlurs, glass, textTracking, textFonts, strokeAlignments, ...images};
+    return {svg: xml(root), effects, texts, artboards, linearTextGradients, angularGradients, backdrops, progressiveBlurs, glass, textTracking, textFonts, strokeAlignments, blendModes, ...images};
 }
 
 // Keep a stable outer group even for empty frames and frames containing one
@@ -1800,7 +1870,7 @@ function importPrepared(result, folder) {
         if (!FileSystemApi.exists(folder)) FileSystemApi.createDirectories(folder);
         if (!FileSystemApi.isDirectory(folder)) fail('The Figma Paste Sources working folder is unavailable.');
     });
-    const importId='Figma-Paste-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
+    const importId='Send-To-Affinity-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
     const assets=result.assets || [], assetFolder=assets.length ? folder+'/'+importId+'/Images' : null;
     const path=folder+'/'+importId+(assets.length ? '/Design.svg' : '.svg');
     let preparedSvg=result.svg;
@@ -1844,6 +1914,7 @@ function importPrepared(result, folder) {
     const doc = new Document(loaded.document), warnings = result.warnings.slice();
     timings.loadMs=Date.now()-stage;stage=Date.now();
     restoreStrokeAlignment(doc,result.strokeAlignments || [],result.packet,warnings);
+    restoreBlendModes(doc,result.blendModes || [],result.packet,warnings);
     restoreTextFonts(doc,result.textFonts || []);
     restoreTextTracking(doc,result.textTracking || [],result.packet,warnings);
     const textFrames=rebuildTextFrames(doc,result.texts || [],warnings);
