@@ -2,7 +2,7 @@
 
 Send a Figma selection to [Affinity](https://www.affinity.studio) as an editable document: live text, vectors, original-resolution images and native blur/shadow effects.
 
-###[Install in Figma](https://www.figma.com/community/plugin/1686668822473949220)
+### [Install in Figma](https://www.figma.com/community/plugin/1686668822473949220)
 
 ## Install
 
