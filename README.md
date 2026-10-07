@@ -2,14 +2,14 @@
 
 Send a Figma selection to [Affinity](https://www.affinity.studio) as an editable document: live text, vectors, original-resolution images and native blur/shadow effects.
 
-<a href="https://github.com/phillip-motion/send-to-affinity/releases"><img width="166" height="48" alt="Download" src="https://github.com/user-attachments/assets/5b04e77e-d2f3-41ad-a1ba-069a65733352" /></a>
+###[Install in Figma](https://www.figma.com/community/plugin/1686668822473949220)
 
 ## Install
 
 **Requirements:** Affinity 3.3 or later, and the Figma desktop app
 
-1. **Affinity:** go to **Settings → Model Context Protocol** and turn on both **Enable Affinity MCP** and **Access Files on your Desktop**. Images are saved alongside each import.
-2. **Figma:** download the [latest release](https://github.com/phillip-motion/send-to-affinity/releases), and unzip it. In Figma desktop, go to **Plugins → Development → Import plugin from manifest…** and choose **`figma-plugin/manifest.json`**.
+1. **Affinity:** go to **Settings → Model Context Protocol** and turn on both **Enable Affinity MCP** and **Access Files on your Desktop**.
+2. In Figma, press `CMD/CTRL` `K`, click `Plugins and Widgets` and search for **Send To Affinity**.
 
 ## Use
 
